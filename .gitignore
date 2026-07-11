@@ -1,0 +1,123 @@
+# ============================================================
+# VoIP Announcement Calling Service — .gitignore
+# ============================================================
+
+# --- SECURITY: Environment & Secrets (CRITICAL) ---
+# NEVER commit .env — it contains real credentials (SIP, API keys, etc.)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.truststore
+credentials*
+secrets*
+*_secret*
+*_private*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+sdist/
+*.whl
+.Python
+pip-wheel-metadata/
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# --- Docker ---
+.docker/
+docker-compose.override.yml
+
+# --- TTS / Audio Cache ---
+audio/.tts_cache/
+*.wav
+*.mp3
+*.ogg
+*.flac
+
+# --- Logs ---
+*.log
+logs/
+
+# --- IDE / Editor ---
+# VS Code
+.vscode/
+*.code-workspace
+# JetBrains
+.idea/
+*.iml
+# Vim / Neovim
+*.swp
+*.swo
+*~
+.*.swp
+.*.swo
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+# Emacs
+*#*
+.#*
+\#*\#
+
+# --- OS Generated Files ---
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+# Linux
+.directory
+.Trash-*
+
+# --- CodeGraph (local machine data) ---
+.codegraph/*.db
+.codegraph/*.db-wal
+.codegraph/*.db-shm
+.codegraph/cache/
+.codegraph/*.log
+.codegraph/daemon.pid
+.codegraph/.dirty
+
+# --- Misc ---
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+tmp/
+temp/
+.cache/
+*.cover
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/

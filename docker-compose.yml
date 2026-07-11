@@ -1,0 +1,41 @@
+services:
+  # ============================================================
+  # Calling API Service
+  # FastAPI REST server: TTS + SIP calling via Python sockets.
+  # Connects to Linphone Free SIP Service (sip.linphone.org) via TLS.
+  # Push notifications work automatically — no Apple Dev account needed.
+  # ============================================================
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    container_name: wcs-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8000}:8000"
+      # RTP audio ports — phone sends/receives media on these
+      - "${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-10020}:${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-10020}/udp"
+    volumes:
+      - audio_data:/audio
+    environment:
+      # SIP Configuration — connects to sip.linphone.org
+      - SIP_DOMAIN=${SIP_DOMAIN:-sip.linphone.org}
+      - SIP_USERNAME=${SIP_USERNAME:-wcs-announcer}
+      - SIP_PASSWORD=${SIP_PASSWORD:-}
+      - SIP_TRANSPORT=${SIP_TRANSPORT:-tls}
+      - SIP_PROXY=${SIP_PROXY:-sip:sip.linphone.org:5061;transport=tls}
+      - RTP_PORT_MIN=${RTP_PORT_MIN:-10000}
+      - RTP_PORT_MAX=${RTP_PORT_MAX:-10020}
+      # TTS Configuration
+      - TTS_ENGINE=${TTS_ENGINE:-gtts}
+      - ZALO_SPEAKER_ID=${ZALO_SPEAKER_ID:-1}
+      - ZALO_SPEED=${ZALO_SPEED:-1.0}
+      # Call Configuration
+      - CALL_TIMEOUT=${CALL_TIMEOUT:-30}
+      - AUDIO_DIR=/audio
+      # Server
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+volumes:
+  audio_data:
+    driver: local
