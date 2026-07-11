@@ -42,6 +42,12 @@ _RE_CSEQ = re.compile(r'^CSeq:\s*(\d+)\s+(\w+)', re.M | re.I)
 _RE_AUDIO_PORT = re.compile(r'^m=audio\s+(\d+)', re.M)
 # Extract connection address from SDP (c=IN IP4 <addr>)
 _RE_CONN_ADDR = re.compile(r'^c=IN\s+IP4\s+([\d.]+)', re.M)
+# Extract To tag from SIP response header
+_RE_TO_TAG = re.compile(r'^To:\s*[^\r\n]+;tag=([^\s;\r\n]+)', re.M | re.I)
+# Extract Contact URI from SIP response header
+_RE_CONTACT = re.compile(r'^Contact:\s*<([^>]+)>', re.M | re.I)
+# Extract Record-Route URIs from SIP response (may appear multiple times)
+_RE_RECORD_ROUTE = re.compile(r'^Record-Route:\s*<([^>]+)>', re.M | re.I)
 
 class CallResult(str, Enum):
     COMPLETED = "completed"
@@ -605,11 +611,28 @@ class SipConnection:
 
                 logger.info("Call connected to %s — RTP %s:%d", target_sip, remote_rtp_addr, remote_rtp_port)
 
-                # Send ACK for 200 OK
+                # Extract To tag, Contact, and Record-Route from 200 OK
+                to_tag_match = _RE_TO_TAG.search(resp)
+                to_tag = to_tag_match.group(1) if to_tag_match else "placeholder"
+
+                contact_match = _RE_CONTACT.search(resp)
+                dialog_uri = contact_match.group(1) if contact_match else target_addr
+                if dialog_uri.startswith("sip:"):
+                    dialog_uri = dialog_uri[4:]
+
+                route_uris = _RE_RECORD_ROUTE.findall(resp)
+                # Route headers must appear in REVERSE order of Record-Route
+                route_headers = "".join(
+                    f"Route: <{uri}>\r\n" for uri in reversed(route_uris)
+                )
+
+                # Send ACK for 200 OK (in-dialog: use Contact URI + Route headers)
                 ok_cseq_match = _RE_CSEQ.search(resp)
                 ok_cseq = int(ok_cseq_match.group(1)) if ok_cseq_match else cseq
                 self._send_ack(call_id, ok_cseq, id_clean, target_addr,
-                               f"z9hG4bK-wcs-ack-{int(time.time()*1000)}")
+                               f"z9hG4bK-wcs-ack-{int(time.time()*1000)}",
+                               to_tag=to_tag, route_headers=route_headers,
+                               request_uri=dialog_uri)
 
                 # Give the phone a moment to open its media port before streaming
                 time.sleep(1.0)
@@ -701,14 +724,32 @@ class SipConnection:
                     time.monotonic() - drain_start,
                 )
 
-                # Send BYE
-                self._send_bye(call_id, id_clean, target_addr)
+                # Send BYE (in-dialog: use Contact URI + Route headers)
+                logger.info(
+                    "Sending BYE — uri=sip:%s to_tag=%s route=%s",
+                    dialog_uri, to_tag, route_uris if route_uris else "(none)",
+                )
+                self._send_bye(call_id, id_clean, target_addr, to_tag=to_tag,
+                               route_headers=route_headers,
+                               request_uri=dialog_uri)
 
                 # Wait for 200 OK to BYE
                 try:
-                    self._recv_until(3.0)
-                except Exception:
-                    pass
+                    bye_resp = self._recv_until(3.0)
+                    if bye_resp:
+                        bye_status_match = _RE_STATUS.search(bye_resp)
+                        bye_status = int(bye_status_match.group(1)) if bye_status_match else 0
+                        if bye_status == 200:
+                            logger.info("BYE acknowledged (200 OK) — %s", target_sip)
+                        else:
+                            logger.warning(
+                                "BYE response: %d — %s\nResponse:\n%s",
+                                bye_status, target_sip, bye_resp[:300],
+                            )
+                    else:
+                        logger.warning("No response to BYE — %s", target_sip)
+                except Exception as exc:
+                    logger.warning("Error waiting for BYE response: %s", exc)
 
                 logger.info("Call completed — %s", target_sip)
                 return CallResult.COMPLETED
@@ -755,32 +796,54 @@ class SipConnection:
 
         return CallResult.NO_ANSWER
 
-    def _send_ack(self, call_id: str, cseq: int, from_id: str, to_addr: str, via_branch: str) -> None:
+    def _send_ack(self, call_id: str, cseq: int, from_id: str, to_addr: str, via_branch: str,
+                  to_tag: str = "placeholder", route_headers: str = "",
+                  request_uri: str = "") -> None:
+        """Send SIP ACK.
+
+        Args:
+            request_uri: SIP URI for the request line. Defaults to *to_addr*.
+                For in-dialog ACK (200 OK), this must be the Contact URI from
+                the 200 OK response.
+        """
         local_port = getattr(self, '_udp_port', 5060)
+        ack_uri = request_uri or to_addr
         ack = (
-            f"ACK sip:{to_addr} SIP/2.0\r\n"
+            f"ACK sip:{ack_uri} SIP/2.0\r\n"
             f"Via: SIP/2.0/{self._transport.upper()} {self._local_ip}:{local_port};branch={via_branch};rport\r\n"
             f"From: <sip:{from_id}>;tag=wcs-call\r\n"
-            f"To: <sip:{to_addr}>;tag=placeholder\r\n"
+            f"To: <sip:{to_addr}>;tag={to_tag}\r\n"
             f"Call-ID: {call_id}\r\n"
             f"CSeq: {cseq} ACK\r\n"
+            f"{route_headers}"
             f"Max-Forwards: 70\r\n"
             f"Content-Length: 0\r\n"
             f"\r\n"
         )
         self._send(ack)
 
-    def _send_bye(self, call_id: str, from_id: str, to_addr: str) -> None:
+    def _send_bye(self, call_id: str, from_id: str, to_addr: str,
+                  to_tag: str = "placeholder", route_headers: str = "",
+                  request_uri: str = "") -> None:
+        """Send SIP BYE.
+
+        Args:
+            request_uri: SIP URI for the request line. Defaults to *to_addr*.
+                For in-dialog BYE, this must be the Contact URI from the
+                200 OK response.
+        """
         cseq = self._next_cseq()
         branch = f"z9hG4bK-wcs-bye-{int(time.time()*1000)}"
         local_port = getattr(self, '_udp_port', 5060)
+        bye_uri = request_uri or to_addr
         bye = (
-            f"BYE sip:{to_addr} SIP/2.0\r\n"
+            f"BYE sip:{bye_uri} SIP/2.0\r\n"
             f"Via: SIP/2.0/{self._transport.upper()} {self._local_ip}:{local_port};branch={branch};rport\r\n"
             f"From: <sip:{from_id}>;tag=wcs-call\r\n"
-            f"To: <sip:{to_addr}>;tag=placeholder\r\n"
+            f"To: <sip:{to_addr}>;tag={to_tag}\r\n"
             f"Call-ID: {call_id}\r\n"
             f"CSeq: {cseq} BYE\r\n"
+            f"{route_headers}"
             f"Max-Forwards: 70\r\n"
             f"Content-Length: 0\r\n"
             f"\r\n"
@@ -797,11 +860,20 @@ class SipConnection:
         local_port = getattr(self, '_udp_port', 5060)
         via_hdr = via_match.group(1) if via_match else \
             f"SIP/2.0/{self._transport.upper()} {self._local_ip}:{local_port};branch=z9hG4bK-dummy"
+        # Extract From and To tags from the BYE request so we can mirror them
+        from_tag_match = _RE_TO_TAG.search(bye_msg)
+        # The To tag regex matches the first tag= in a To line.
+        # For the BYE's From tag, we need a dedicated regex.
+        from_tag = ""
+        fm_match = re.search(r'^From:\s*[^\r\n]+;tag=([^\s;\r\n]+)', bye_msg, re.M | re.I)
+        if fm_match:
+            from_tag = fm_match.group(1)
+        to_tag = from_tag_match.group(1) if from_tag_match else "wcs-call"
         ok_resp = (
             f"SIP/2.0 200 OK\r\n"
             f"Via: {via_hdr}\r\n"
-            f"From: <sip:{to_addr}>;tag=placeholder\r\n"
-            f"To: <sip:{from_id}>;tag=wcs-call\r\n"
+            f"From: <sip:{to_addr}>;tag={from_tag}\r\n"
+            f"To: <sip:{from_id}>;tag={to_tag}\r\n"
             f"Call-ID: {call_id}\r\n"
             f"CSeq: {cseq} BYE\r\n"
             f"Content-Length: 0\r\n"
