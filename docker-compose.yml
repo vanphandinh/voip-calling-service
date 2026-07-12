@@ -24,6 +24,7 @@ services:
       - SIP_PASSWORD=${SIP_PASSWORD:-}
       - SIP_TRANSPORT=${SIP_TRANSPORT:-tls}
       - SIP_PROXY=${SIP_PROXY:-sip:sip.linphone.org:5061;transport=tls}
+      - SIP_NAT_ADDRESS=${SIP_NAT_ADDRESS:-}
       - RTP_PORT_MIN=${RTP_PORT_MIN:-10000}
       - RTP_PORT_MAX=${RTP_PORT_MAX:-10020}
       # TTS Configuration
@@ -36,9 +37,11 @@ services:
       - TTS_CACHE_MAX_AGE_DAYS=${TTS_CACHE_MAX_AGE_DAYS:-30}
       # Call Configuration
       - CALL_TIMEOUT=${CALL_TIMEOUT:-30}
-      - AUDIO_DIR=/audio
+      - AUDIO_DIR=${AUDIO_DIR:-/audio}
       # Server
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Auth
+      - SECRET_KEY=${SECRET_KEY:-}
 
 volumes:
   audio_data:

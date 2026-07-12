@@ -12,11 +12,13 @@ import json
 import logging
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
@@ -32,18 +34,12 @@ class TTSException(Exception):
 class TTSService:
     """Vietnamese TTS abstraction over multiple backends."""
 
-    # Supported backends
-    BACKEND_GTTTS = "gtts"
-    BACKEND_ZALO = "zalo"
-    BACKEND_ESPEAK = "espeak"
-
     # Zalo API constants
     _ZALO_PAGE_URL = "https://ai.zalo.solutions/products/text-to-audio-converter"
     _ZALO_API_URL = "https://ai.zalo.solutions/api/demo/v1/tts/synthesize"
 
     def __init__(self, config: TtsConfig) -> None:
         self._config = config
-        self._engine = config.engine
         self._zalo_cookie: Optional[str] = None
 
     # ------------------------------------------------------------------
@@ -75,6 +71,20 @@ class TTSService:
     def _cache_path(self, key: str) -> Path:
         """Return the path for a given cache key."""
         return self._cache_dir() / f"{key}.wav"
+
+    def _build_backend_order(self) -> list[tuple[str, Callable[[str, Path], Path]]]:
+        """Return (name, method) pairs in priority: primary engine, then fallbacks."""
+        engine_map: dict[str, tuple[str, Callable[[str, Path], Path]]] = {
+            "gtts": ("gTTS", self._synthesize_gtts),
+            "zalo": ("Zalo", self._synthesize_zalo),
+            "espeak": ("espeak", self._synthesize_espeak),
+        }
+        primary = self._config.engine
+        order = [primary]
+        for eng in ("gtts", "zalo", "espeak"):
+            if eng not in order:
+                order.append(eng)
+        return [engine_map[eng] for eng in order if eng in engine_map]
 
     # ------------------------------------------------------------------
     # Public API
@@ -111,44 +121,29 @@ class TTSService:
                 cached.touch()  # reset mtime so frequently-used files survive cleanup
                 return wav_path
 
-        # Build ordered list of backends to try based on config.
-        # Fallback chain: configured primary → gTTS → espeak (last resort)
-        backends: list[tuple[str, object]] = []
-        if self._config.use_gtts:
-            backends.append(("gTTS", self._synthesize_gtts))
-        if self._config.use_zalo:
-            backends.append(("Zalo", self._synthesize_zalo))
+        # Build ordered list of backends: configured primary first, then fallbacks
+        backends = self._build_backend_order()
 
-        # Try configured backends in order
-        primary_success = False
+        # Try backends in order until one succeeds
+        last_exception: Optional[Exception] = None
         for name, method in backends:
             try:
-                result = method(text, wav_path)
-                # First listed backend is the primary — only that one is cached
-                primary_success = (name == backends[0][0])
+                method(text, wav_path)
+                logger.info("TTS succeeded with %s", name)
                 break
             except Exception as exc:
-                logger.warning("%s failed (%s), falling back", name, exc)
+                logger.warning(
+                    "%s failed (%s: %s), trying next backend",
+                    name, type(exc).__name__, exc,
+                )
+                last_exception = exc
+        else:
+            # Loop completed without break — all backends failed
+            raise TTSException(
+                f"All TTS backends failed for text: '{text[:50]}...'"
+            ) from last_exception
 
-        if not primary_success:
-            # Fallback: gTTS (if not already the primary engine)
-            if not self._config.use_gtts:
-                try:
-                    logger.info("Attempting gTTS as fallback")
-                    return self._synthesize_gtts(text, wav_path)
-                except Exception as exc:
-                    logger.warning("gTTS fallback failed (%s)", exc)
-
-            # Last resort: espeak always available offline
-            try:
-                logger.info("Attempting espeak as last-resort fallback")
-                return self._synthesize_espeak(text, wav_path)
-            except Exception as exc:
-                raise TTSException(
-                    f"All TTS backends failed for text: '{text[:50]}...'"
-                ) from exc
-
-        # --- Cache: save successful primary-engine result ---
+        # --- Cache: save successful result (regardless of which backend produced it) ---
         if self._config.tts_cache_enabled:
             cached = self._cache_path(cache_key)
             try:
@@ -266,7 +261,6 @@ class TTSService:
         old_engine = self._config.engine
         old_speaker = self._config.zalo_speaker_id
         self._config = config
-        self._engine = config.engine
         if old_engine != config.engine or old_speaker != config.zalo_speaker_id:
             self._zalo_cookie = None
             logger.debug("Zalo cookie cleared due to config change")
@@ -274,9 +268,10 @@ class TTSService:
     def get_duration(self, wav_path: Path) -> float:
         """Return the duration of a WAV file in seconds.
 
-        Uses ffprobe if available, otherwise estimates from file size.
+        Uses ffprobe if available, then RIFF header parsing,
+        and finally file-size estimation as fallback.
         """
-        # Try ffprobe first (accurate)
+        # 1. Try ffprobe first (most accurate)
         try:
             result = subprocess.run(
                 [
@@ -294,12 +289,42 @@ class TTSService:
         except (FileNotFoundError, ValueError, subprocess.TimeoutExpired):
             pass
 
-        # Fallback: estimate from file size
-        # WAV 8000 Hz, 16-bit, mono = 16000 bytes/sec
+        # 2. Parse RIFF WAV header (accurate for standard WAV files)
+        try:
+            duration = self._parse_wav_header(wav_path)
+            if duration is not None and duration > 0:
+                return duration
+        except (OSError, struct.error):
+            pass
+
+        # 3. Fallback: estimate from file size
+        #    Assume 8 kHz, 16-bit, mono = 16,000 bytes/sec
         file_size = wav_path.stat().st_size
-        if file_size > 44:  # skip WAV header
+        if file_size > 44:
             return (file_size - 44) / 16000.0
         return 0.0
+
+    @staticmethod
+    def _parse_wav_header(wav_path: Path) -> Optional[float]:
+        """Parse WAV RIFF header to compute exact duration.
+
+        Returns duration in seconds, or ``None`` if the header cannot be parsed.
+        """
+        with open(wav_path, "rb") as f:
+            header = f.read(44)
+        if len(header) < 44:
+            return None
+        if header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+            return None
+        channels = struct.unpack("<H", header[22:24])[0]
+        sample_rate = struct.unpack("<I", header[24:28])[0]
+        bits_per_sample = struct.unpack("<H", header[34:36])[0]
+        data_size = struct.unpack("<I", header[40:44])[0]
+
+        bytes_per_second = sample_rate * channels * (bits_per_sample // 8)
+        if bytes_per_second == 0 or data_size == 0:
+            return None
+        return data_size / bytes_per_second
 
     # ------------------------------------------------------------------
     # Zalo AI TTS backend
@@ -390,9 +415,16 @@ class TTSService:
             try:
                 with urllib.request.urlopen(api_req, timeout=30) as resp:
                     body = resp.read().decode()
+            except urllib.request.HTTPError as exc:
+                if exc.code in (401, 403):
+                    self._zalo_cookie = None
+                raise TTSException(
+                    f"Zalo API request failed (HTTP {exc.code}): {exc}"
+                ) from exc
             except urllib.request.URLError as exc:
-                self._zalo_cookie = None
-                raise TTSException(f"Zalo API request failed: {exc}") from exc
+                raise TTSException(
+                    f"Zalo API request failed (network): {exc}"
+                ) from exc
 
             # Parse response
             try:
@@ -421,9 +453,6 @@ class TTSService:
                 f"Zalo TTS error {error_code}: "
                 f"{result.get('error_message', 'unknown')}"
             )
-        else:
-            # Should be unreachable, but guard against logic errors
-            raise TTSException("Zalo TTS API retry loop exhausted")
 
         m3u8_url = result.get("data", {}).get("url")
         if not m3u8_url:

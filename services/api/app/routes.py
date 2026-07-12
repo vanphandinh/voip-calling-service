@@ -1,8 +1,13 @@
 """API route handlers for the VoIP Calling Service."""
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import logging
-from typing import Optional
+import time
+from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -13,6 +18,8 @@ from .models import (
     CallResponse,
     CallStatusResponse,
     HealthResponse,
+    TokenRequest,
+    TokenResponse,
     TtsCacheCleanupResponse,
     TtsCacheStatsResponse,
     TtsConfigResponse,
@@ -23,22 +30,52 @@ logger = logging.getLogger("wcs.routes")
 
 router = APIRouter(prefix="/api/v1", tags=["calls"])
 
-# CallManager singleton — initialized on first request
-_manager: Optional[CallManager] = None
+# ---------------------------------------------------------------------------
+# Rate limiting — sliding window per source IP
+# ---------------------------------------------------------------------------
+
+_rate_limit_buckets: dict[str, list[float]] = defaultdict(list)
+RATE_LIMIT_MAX = 10       # max calls per window
+RATE_LIMIT_WINDOW = 1.0   # window in seconds
+
+# Token expiry (seconds)
+TOKEN_EXPIRY_SECONDS = 86400  # 24 hours
+
+
+def _check_rate_limit(request: Request) -> bool:
+    """Enforce per-IP rate limit. Returns ``True`` if the request is allowed."""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    window_start = now - RATE_LIMIT_WINDOW
+
+    bucket = _rate_limit_buckets[client_ip]
+    _rate_limit_buckets[client_ip] = [t for t in bucket if t >= window_start]
+
+    if not _rate_limit_buckets[client_ip]:
+        del _rate_limit_buckets[client_ip]
+        return True
+
+    if len(_rate_limit_buckets[client_ip]) >= RATE_LIMIT_MAX:
+        logger.warning("Rate limit exceeded for IP %s", client_ip)
+        return False
+
+    _rate_limit_buckets[client_ip].append(now)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Manager singleton
+# ---------------------------------------------------------------------------
+
+# CallManager singleton — created in main.py lifespan
+_manager: CallManager | None = None
 
 
 def _get_manager(request: Request) -> CallManager:
-    """Lazy-initialize and return the CallManager singleton."""
+    """Return the CallManager singleton (set during app lifespan)."""
     global _manager
     if _manager is None:
-        config = request.app.state.config
-        _manager = CallManager(config)
-        # Ensure SIP connection on startup
-        try:
-            _manager._sip.connect()
-        except Exception as exc:
-            logger.error("Initial SIP connection failed: %s", exc, exc_info=True)
-            # Don't fail — will retry on first call
+        _manager = request.app.state.call_manager
     return _manager
 
 
@@ -52,9 +89,9 @@ async def health_check(request: Request):
     mgr = _get_manager(request)
     return HealthResponse(
         status="ok",
-        sip_registered=mgr._sip.is_registered,
+        sip_registered=mgr.is_sip_registered if mgr else False,
         tts_engine=request.app.state.config.tts.engine,
-        active_calls=mgr.active_call_count,
+        active_calls=mgr.active_call_count if mgr else 0,
     )
 
 
@@ -70,6 +107,14 @@ async def trigger_call(request: Request, body: CallRequest):
     to the target user. The call runs asynchronously — use the
     returned `call_id` to poll for status.
     """
+    # Rate limiting
+    if not _check_rate_limit(request):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded: max {RATE_LIMIT_MAX} calls per "
+            f"{RATE_LIMIT_WINDOW}s per IP",
+        )
+
     mgr = _get_manager(request)
 
     # Validate target format
@@ -100,10 +145,10 @@ async def list_calls(
 ):
     """List recent calls, newest first."""
     mgr = _get_manager(request)
-    calls = mgr.list_calls(offset=offset, limit=limit)
+    calls, total = mgr.list_calls(offset=offset, limit=limit)
     return CallListResponse(
         calls=calls,
-        total=len(calls),
+        total=total,
         offset=offset,
         limit=limit,
     )
@@ -201,4 +246,45 @@ async def get_tts_cache_stats(request: Request):
         total_size_bytes=stats["total_size_bytes"],
         total_size_mb=round(stats["total_size_bytes"] / 1048576, 2),
         cache_dir=stats["cache_dir"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/token", response_model=TokenResponse)
+async def create_token(request: Request, body: TokenRequest):
+    """Exchange master secret key for a signed HMAC access token.
+
+    The token is valid for 24 hours and is verified on all other
+    endpoints via the ``Authorization: Bearer <token>`` header.
+    """
+    config = request.app.state.config
+    if not hmac.compare_digest(body.secret_key.encode(), config.secret_key.encode()):
+        raise HTTPException(status_code=401, detail="Invalid secret key")
+
+    now = int(time.time())
+    payload = {
+        "iat": now,
+        "exp": now + TOKEN_EXPIRY_SECONDS,
+        "jti": hashlib.sha256(
+            f"{now}-{config.secret_key}".encode()
+        ).hexdigest()[:16],
+    }
+    payload_b64 = base64.urlsafe_b64encode(
+        json.dumps(payload).encode()
+    ).rstrip(b"=").decode()
+
+    signature = hmac.new(
+        config.secret_key.encode(),
+        payload_b64.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    token = f"{payload_b64}.{signature}"
+    return TokenResponse(
+        access_token=token,
+        expires_in=TOKEN_EXPIRY_SECONDS,
     )

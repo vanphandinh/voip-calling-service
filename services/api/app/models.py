@@ -17,8 +17,6 @@ class CallStatus(str, Enum):
     QUEUED = "queued"
     SYNTHESIZING = "synthesizing"  # TTS conversion in progress
     CALLING = "calling"  # SIP call being placed
-    CONNECTED = "connected"  # remote answered
-    PLAYING = "playing"  # audio announcement playing
     COMPLETED = "completed"
     FAILED = "failed"
     NO_ANSWER = "no_answer"
@@ -190,3 +188,26 @@ class TtsCacheCleanupResponse(BaseModel):
     freed_bytes: int
     freed_mb: float
     max_age_days: int
+
+
+# ---------------------------------------------------------------------------
+# Auth models
+# ---------------------------------------------------------------------------
+
+
+class TokenRequest(BaseModel):
+    """Request to exchange master secret key for an access token."""
+
+    secret_key: str = Field(
+        ...,
+        min_length=8,
+        description="Master secret key configured via SECRET_KEY env var",
+    )
+
+
+class TokenResponse(BaseModel):
+    """Signed access token response."""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds until expiry

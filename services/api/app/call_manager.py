@@ -6,13 +6,17 @@ background tasks so the API can return immediately.
 
 from __future__ import annotations
 
+import aiohttp
 import asyncio
+import ipaddress
 import logging
 import math
+import socket
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from .config import AppConfig, TtsConfig
 from .models import CallRequest, CallResponse, CallStatus, CallStatusResponse
@@ -25,6 +29,10 @@ logger = logging.getLogger("wcs.manager")
 # clean end-of-stream and prevent the last audio packets from being
 # dropped during ffmpeg shutdown (AVIO buffer flush race).
 APAD_SECS = 5
+
+# Maximum number of call records kept in memory. Oldest terminal
+# records (completed/failed) are evicted when this limit is exceeded.
+MAX_CALL_RECORDS = 10000
 
 
 class CallRecord:
@@ -74,7 +82,6 @@ class CallManager:
         self._tts = TTSService(config.tts)
         self._calls: dict[str, CallRecord] = {}
         self._lock = threading.Lock()
-        self._running = True
 
     # ------------------------------------------------------------------
     # Public API
@@ -90,6 +97,7 @@ class CallManager:
 
         with self._lock:
             self._calls[record.call_id] = record
+            self._evict_old_records()
 
         logger.info(
             "Call %s queued: target=%s, message='%s...'",
@@ -97,7 +105,14 @@ class CallManager:
         )
 
         # Launch background execution
-        asyncio.create_task(self._execute(record))
+        try:
+            asyncio.create_task(self._execute(record))
+        except RuntimeError:
+            # No running event loop — spawn a background thread
+            threading.Thread(
+                target=lambda: asyncio.run(self._execute(record)),
+                daemon=True,
+            ).start()
 
         return response
 
@@ -105,27 +120,43 @@ class CallManager:
         """Get the current status of a call by ID."""
         with self._lock:
             record = self._calls.get(call_id)
-        return record.to_response() if record else None
+            return record.to_response() if record else None
 
-    def list_calls(self, offset: int = 0, limit: int = 50) -> list[CallStatusResponse]:
-        """List recent calls, newest first."""
+    def list_calls(self, offset: int = 0, limit: int = 50) -> tuple[list[CallStatusResponse], int]:
+        """List recent calls, newest first.
+
+        Returns:
+            ``(responses, total_count)`` tuple.
+        """
         with self._lock:
             all_calls = sorted(
                 self._calls.values(),
                 key=lambda r: r.created_at,
                 reverse=True,
             )
-        return [r.to_response() for r in all_calls[offset:offset + limit]]
+            total = len(all_calls)
+            return (
+                [r.to_response() for r in all_calls[offset:offset + limit]],
+                total,
+            )
 
     @property
     def active_call_count(self) -> int:
-        active = {CallStatus.CALLING, CallStatus.CONNECTED, CallStatus.PLAYING}
+        active = {CallStatus.CALLING}
         with self._lock:
             return sum(1 for r in self._calls.values() if r.status in active)
 
+    @property
+    def is_sip_registered(self) -> bool:
+        """Whether the SIP controller is currently registered with the proxy."""
+        return self._sip.is_registered
+
+    def connect_sip(self) -> None:
+        """Connect and register with the SIP proxy."""
+        self._sip.connect()
+
     def shutdown(self) -> None:
         """Gracefully stop the SIP controller."""
-        self._running = False
         self._sip.disconnect()
 
     def update_tts_config(self, config: TtsConfig) -> None:
@@ -155,6 +186,47 @@ class CallManager:
         Delegates to :meth:`TTSService.get_cache_stats`.
         """
         return self._tts.get_cache_stats()
+
+    # ------------------------------------------------------------------
+    # Eviction
+    # ------------------------------------------------------------------
+
+    def _evict_old_records(self) -> None:
+        """Evict oldest terminal records when over the max limit."""
+        if len(self._calls) <= MAX_CALL_RECORDS:
+            return
+
+        terminal = {
+            CallStatus.COMPLETED, CallStatus.FAILED,
+            CallStatus.NO_ANSWER, CallStatus.BUSY,
+        }
+        terminal_records = sorted(
+            [r for r in self._calls.values() if r.status in terminal],
+            key=lambda r: r.updated_at,
+        )
+        target = int(MAX_CALL_RECORDS * 0.9)
+        excess = len(terminal_records) - target
+        if excess > 0:
+            for r in terminal_records[:excess]:
+                del self._calls[r.call_id]
+            logger.info(
+                "Evicted %d old call record(s) (total=%d, limit=%d)",
+                excess, len(self._calls), MAX_CALL_RECORDS,
+            )
+
+        # Hard cap: if still over 120% limit, evict oldest regardless of status
+        hard_limit = int(MAX_CALL_RECORDS * 1.2)
+        if len(self._calls) > hard_limit:
+            all_sorted = sorted(
+                self._calls.values(), key=lambda r: r.updated_at
+            )
+            overflow = len(self._calls) - target
+            for r in all_sorted[:overflow]:
+                del self._calls[r.call_id]
+            logger.warning(
+                "Hard eviction: removed %d records (over 120%% limit, total=%d)",
+                overflow, len(self._calls),
+            )
 
     # ------------------------------------------------------------------
     # Background execution
@@ -201,7 +273,8 @@ class CallManager:
                 CallResult.COMPLETED: CallStatus.COMPLETED,
                 CallResult.NO_ANSWER: CallStatus.NO_ANSWER,
                 CallResult.BUSY: CallStatus.BUSY,
-                CallResult.DECLINED: CallStatus.NO_ANSWER,
+                # DECLINED → FAILED: callee actively rejected, not "no answer"
+                CallResult.DECLINED: CallStatus.FAILED,
                 CallResult.FAILED: CallStatus.FAILED,
             }
             final_status = status_map.get(result, CallStatus.FAILED)
@@ -238,16 +311,27 @@ class CallManager:
 
     def _transition(self, record: CallRecord, status: CallStatus, error: Optional[str] = None) -> None:
         """Update call status with timestamp."""
-        record.status = status
-        record.updated_at = datetime.now(timezone.utc)
-        if error:
-            record.error_message = error
+        with self._lock:
+            record.status = status
+            record.updated_at = datetime.now(timezone.utc)
+            if error:
+                record.error_message = error
         logger.debug("Call %s → %s", record.call_id, status.value)
 
     async def _fire_webhook(self, record: CallRecord) -> None:
         """POST call status to the callback URL."""
         try:
-            import aiohttp
+            # SSRF protection: reject private/internal IP targets
+            # DNS lookup runs in thread pool to avoid blocking the event loop
+            loop = asyncio.get_running_loop()
+            is_private = await loop.run_in_executor(
+                None, self._is_private_target, record.callback_url
+            )
+            if is_private:
+                logger.warning(
+                    "Blocked callback to private/internal IP: %s", record.callback_url
+                )
+                return
 
             async with aiohttp.ClientSession() as session:
                 payload = record.to_response().model_dump(mode="json")
@@ -259,3 +343,35 @@ class CallManager:
                     logger.debug("Webhook to %s → HTTP %d", record.callback_url, resp.status)
         except Exception:
             logger.warning("Webhook to %s failed", record.callback_url, exc_info=True)
+
+    @staticmethod
+    def _is_private_target(url: str) -> bool:
+        """Check whether *url* resolves to a private/internal IP address.
+
+        Returns ``True`` (block) if:
+        - The hostname cannot be extracted
+        - Any resolved IP is in a private, loopback, link-local, or
+          unspecified range
+        """
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+            if not hostname:
+                return True
+            addrs = socket.getaddrinfo(hostname, None)
+            for family, _, _, _, sockaddr in addrs:
+                ip_str = sockaddr[0]
+                try:
+                    ip = ipaddress.ip_address(ip_str)
+                    if (
+                        ip.is_private
+                        or ip.is_loopback
+                        or ip.is_link_local
+                        or ip.is_unspecified
+                    ):
+                        return True
+                except ValueError:
+                    continue
+            return False
+        except (socket.gaierror, ValueError, OSError):
+            return True  # cannot resolve — block to be safe
