@@ -108,6 +108,7 @@ class TTSService:
             if cached.exists() and cached.stat().st_size >= 100:
                 logger.info("TTS cache HIT for key=%s (engine=%s)", cache_key, self._config.engine)
                 shutil.copy2(cached, wav_path)
+                cached.touch()  # reset mtime so frequently-used files survive cleanup
                 return wav_path
 
         # Build ordered list of backends to try based on config.
@@ -157,6 +158,104 @@ class TTSService:
                 logger.warning("Failed to write TTS cache: %s", exc)
 
         return wav_path
+
+    def cleanup_cache(self, max_age_days: int) -> tuple[int, int]:
+        """Delete cached WAV files older than *max_age_days*.
+
+        Scans the cache directory, checks each ``.wav`` file's modification
+        time, and removes files whose age exceeds the cutoff.  Files that
+        are still being used (cache hits) have their mtime refreshed by
+        :meth:`synthesize`, so they survive cleanup.
+
+        Args:
+            max_age_days: Files whose mtime is older than this many days
+                are removed.
+
+        Returns:
+            ``(files_deleted, total_bytes_freed)``.
+        """
+        cache_dir = self._cache_dir()
+        if not cache_dir.is_dir():
+            logger.info(
+                "Cache directory %s does not exist, nothing to clean", cache_dir
+            )
+            return (0, 0)
+
+        now = time.time()
+        cutoff = now - (max_age_days * 86400)
+        deleted = 0
+        freed = 0
+
+        for entry in cache_dir.iterdir():
+            if not entry.is_file() or entry.suffix != ".wav":
+                continue
+            try:
+                stat = entry.stat()
+                if stat.st_mtime < cutoff:
+                    size = stat.st_size
+                    entry.unlink()
+                    deleted += 1
+                    freed += size
+                    logger.debug(
+                        "Deleted expired cache file %s (age=%.1f days)",
+                        entry.name,
+                        (now - stat.st_mtime) / 86400,
+                    )
+            except OSError as exc:
+                logger.warning("Failed to clean cache file %s: %s", entry.name, exc)
+
+        if deleted:
+            logger.info(
+                "Cache cleanup: deleted %d files, freed %d bytes (%.1f MB)",
+                deleted, freed, freed / 1048576,
+            )
+        else:
+            logger.info(
+                "Cache cleanup: no expired files found (max_age=%d days)", max_age_days
+            )
+
+        return (deleted, freed)
+
+    def get_cache_stats(self) -> dict:
+        """Return statistics about the TTS cache.
+
+        Returns:
+            A dict with keys ``total_files``, ``total_size_bytes``,
+            and ``cache_dir``.
+        """
+        # Resolve path *without* creating the directory (read-only operation).
+        # _cache_dir() calls mkdir() which is undesirable for a stats endpoint.
+        if self._config.tts_cache_dir:
+            cache_dir = Path(self._config.tts_cache_dir)
+        else:
+            cache_dir = Path(tempfile.gettempdir()) / "wcs_tts_cache"
+
+        if not cache_dir.is_dir():
+            return {
+                "total_files": 0,
+                "total_size_bytes": 0,
+                "cache_dir": str(cache_dir),
+            }
+
+        total_files = 0
+        total_size = 0
+
+        try:
+            for entry in cache_dir.iterdir():
+                if entry.is_file() and entry.suffix == ".wav":
+                    total_files += 1
+                    try:
+                        total_size += entry.stat().st_size
+                    except OSError:
+                        pass
+        except PermissionError as exc:
+            logger.warning("Cannot read cache directory %s: %s", cache_dir, exc)
+
+        return {
+            "total_files": total_files,
+            "total_size_bytes": total_size,
+            "cache_dir": str(cache_dir),
+        }
 
     def update_config(self, config: TtsConfig) -> None:
         """Update TTS configuration at runtime (engine, speaker, speed).

@@ -110,6 +110,8 @@ curl -X POST http://localhost:8000/api/v1/call \
 | `GET` | `/api/v1/health` | Health check |
 | `GET` | `/api/v1/tts/config` | Xem cấu hình TTS hiện tại |
 | `PUT` | `/api/v1/tts/config` | Đổi engine/giọng nói/tốc độ runtime |
+| `GET` | `/api/v1/tts/cache` | Xem thống kê cache TTS |
+| `DELETE` | `/api/v1/tts/cache` | Xóa file cache TTS cũ hơn N ngày |
 | `GET` | `/docs` | Swagger UI |
 
 ### POST /api/v1/call
@@ -175,6 +177,31 @@ curl -X PUT http://localhost:8000/api/v1/tts/config \
 
 > **Fallback chain**: Khi engine chính lỗi, hệ thống tự động thử: engine đã config → gTTS → espeak. Điều này đảm bảo cuộc gọi luôn được thực hiện ngay cả khi mất internet.
 
+## Quản lý cache TTS
+
+Audio đã synthesize được cache để tránh gọi lại TTS API. Cache nằm trong Docker volume
+`audio_data` → tồn tại qua các lần rebuild.
+
+File cache có `mtime` được reset mỗi lần được dùng lại (cache hit) → chỉ file thực sự
+không còn dùng mới bị xóa khi cleanup.
+
+### Xem thống kê cache
+
+```bash
+curl http://localhost:8000/api/v1/tts/cache
+# {"total_files":42,"total_size_bytes":5242880,"total_size_mb":5.0,"cache_dir":"/audio/.tts_cache"}
+```
+
+### Dọn dẹp cache cũ
+
+```bash
+# Xóa file cache cũ hơn TTS_CACHE_MAX_AGE_DAYS (mặc định 30 ngày)
+curl -X DELETE http://localhost:8000/api/v1/tts/cache
+# {"deleted_files":5,"freed_bytes":640000,"freed_mb":0.61,"max_age_days":30}
+```
+
+> **Gợi ý**: Đặt cron job gọi `DELETE /api/v1/tts/cache` hàng tuần để giữ cache gọn gàng.
+
 ## Trạng thái cuộc gọi
 
 | Trạng thái | Ý nghĩa |
@@ -204,6 +231,7 @@ curl -X PUT http://localhost:8000/api/v1/tts/config \
 | `CALL_TIMEOUT` | `30` | Thời gian tối đa mỗi cuộc gọi (giây) |
 | `TTS_CACHE_ENABLED` | `true` | Bật/tắt cache audio TTS (`true`/`false`) |
 | `TTS_CACHE_DIR` | *(hệ thống)* | Thư mục cache, mặc định `%TEMP%/wcs_tts_cache/` |
+| `TTS_CACHE_MAX_AGE_DAYS` | `30` | Số ngày tối đa file cache được giữ, file cũ hơn bị xóa khi gọi `DELETE /api/v1/tts/cache` |
 | `API_PORT` | `8000` | Cổng API HTTP |
 | `LOG_LEVEL` | `INFO` | Log level |
 

@@ -142,6 +142,20 @@ class CallManager:
             config.zalo_speed,
         )
 
+    def cleanup_tts_cache(self, max_age_days: int) -> tuple[int, int]:
+        """Delete expired TTS cache files.
+
+        Delegates to :meth:`TTSService.cleanup_cache`.
+        """
+        return self._tts.cleanup_cache(max_age_days)
+
+    def get_tts_cache_stats(self) -> dict:
+        """Return TTS cache statistics.
+
+        Delegates to :meth:`TTSService.get_cache_stats`.
+        """
+        return self._tts.get_cache_stats()
+
     # ------------------------------------------------------------------
     # Background execution
     # ------------------------------------------------------------------

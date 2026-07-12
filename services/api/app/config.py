@@ -43,6 +43,7 @@ class TtsConfig:
     zalo_speed: float = 1.0   # Zalo speed (0.8-1.2)
     tts_cache_enabled: bool = True
     tts_cache_dir: str = ""  # empty = use {audio_dir}/.tts_cache
+    tts_cache_max_age_days: int = 30  # files older than this are cleaned up
 
     @property
     def use_gtts(self) -> bool:
@@ -94,6 +95,7 @@ class AppConfig:
                 zalo_speed=float(os.getenv("ZALO_SPEED", "1.0")),
                 tts_cache_enabled=os.getenv("TTS_CACHE_ENABLED", "true").lower() != "false",
                 tts_cache_dir=os.getenv("TTS_CACHE_DIR", ""),
+                tts_cache_max_age_days=int(os.getenv("TTS_CACHE_MAX_AGE_DAYS", "30")),
             ),
             call=CallConfig(
                 timeout=int(os.getenv("CALL_TIMEOUT", "30")),

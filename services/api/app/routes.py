@@ -1,5 +1,6 @@
 """API route handlers for the VoIP Calling Service."""
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -12,6 +13,8 @@ from .models import (
     CallResponse,
     CallStatusResponse,
     HealthResponse,
+    TtsCacheCleanupResponse,
+    TtsCacheStatsResponse,
     TtsConfigResponse,
     TtsConfigUpdate,
 )
@@ -151,4 +154,51 @@ async def update_tts_config(request: Request, body: TtsConfigUpdate):
         engine=tts.engine,
         zalo_speaker_id=tts.zalo_speaker_id,
         zalo_speed=tts.zalo_speed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# TTS cache management
+# ---------------------------------------------------------------------------
+
+@router.delete("/tts/cache", response_model=TtsCacheCleanupResponse)
+async def clear_tts_cache(request: Request):
+    """Delete TTS cache files older than the configured max age.
+
+    Cache files are identified by their last modification time.
+    The cutoff age is defined by ``TTS_CACHE_MAX_AGE_DAYS``
+    (default: 30 days).  Files that are still in active use have
+    their mtime refreshed on each cache hit, so they survive cleanup.
+
+    This is an on-demand operation — no automatic cleanup runs.
+    Call this endpoint periodically to keep the cache from growing
+    without bound.
+    """
+    mgr = _get_manager(request)
+    max_age_days = request.app.state.config.tts.tts_cache_max_age_days
+
+    deleted, freed = await asyncio.to_thread(
+        mgr.cleanup_tts_cache, max_age_days
+    )
+
+    return TtsCacheCleanupResponse(
+        deleted_files=deleted,
+        freed_bytes=freed,
+        freed_mb=round(freed / 1048576, 2),
+        max_age_days=max_age_days,
+    )
+
+
+@router.get("/tts/cache", response_model=TtsCacheStatsResponse)
+async def get_tts_cache_stats(request: Request):
+    """Return current TTS cache statistics without deleting anything."""
+    mgr = _get_manager(request)
+
+    stats = await asyncio.to_thread(mgr.get_tts_cache_stats)
+
+    return TtsCacheStatsResponse(
+        total_files=stats["total_files"],
+        total_size_bytes=stats["total_size_bytes"],
+        total_size_mb=round(stats["total_size_bytes"] / 1048576, 2),
+        cache_dir=stats["cache_dir"],
     )

@@ -168,3 +168,25 @@ class TtsConfigResponse(BaseModel):
     zalo_voices: list[ZaloVoiceInfo] = Field(
         default_factory=lambda: list(ZALO_VOICES)
     )
+
+
+# ---------------------------------------------------------------------------
+# TTS cache models
+# ---------------------------------------------------------------------------
+
+class TtsCacheStatsResponse(BaseModel):
+    """Statistics about the TTS cache directory."""
+
+    total_files: int
+    total_size_bytes: int
+    total_size_mb: float
+    cache_dir: str
+
+
+class TtsCacheCleanupResponse(BaseModel):
+    """Result of a TTS cache cleanup operation."""
+
+    deleted_files: int
+    freed_bytes: int
+    freed_mb: float
+    max_age_days: int

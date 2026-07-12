@@ -30,6 +30,10 @@ services:
       - TTS_ENGINE=${TTS_ENGINE:-gtts}
       - ZALO_SPEAKER_ID=${ZALO_SPEAKER_ID:-1}
       - ZALO_SPEED=${ZALO_SPEED:-1.0}
+      # TTS Cache
+      - TTS_CACHE_ENABLED=${TTS_CACHE_ENABLED:-true}
+      - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/audio/.tts_cache}
+      - TTS_CACHE_MAX_AGE_DAYS=${TTS_CACHE_MAX_AGE_DAYS:-30}
       # Call Configuration
       - CALL_TIMEOUT=${CALL_TIMEOUT:-30}
       - AUDIO_DIR=/audio
