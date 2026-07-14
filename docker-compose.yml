@@ -17,6 +17,8 @@ services:
       - "${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-10020}:${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-10020}/udp"
     volumes:
       - audio_data:/audio
+      # Let's Encrypt live certificates (read-only)
+      - "/etc/letsencrypt:/etc/letsencrypt:ro"
     environment:
       # SIP Configuration — connects to sip.linphone.org
       - SIP_DOMAIN=${SIP_DOMAIN:-sip.linphone.org}
@@ -42,6 +44,9 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # Auth
       - SECRET_KEY=${SECRET_KEY:-}
+      # SSL / HTTPS (Let's Encrypt)
+      - SSL_ENABLED=${SSL_ENABLED:-}
+      - SSL_DOMAIN=${SSL_DOMAIN:-}
 
 volumes:
   audio_data:

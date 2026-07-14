@@ -27,6 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Utilities
     curl \
     ca-certificates \
+    # Privilege drop for entrypoint (SSL cert setup)
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------------
@@ -47,6 +49,10 @@ RUN mkdir -p /audio && \
     useradd --create-home --shell /bin/bash wcs && \
     chown -R wcs:wcs /app /audio
 
+# --- Entrypoint & Health Check scripts ---
+COPY entrypoint.sh healthcheck.sh /app/
+RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
+
 USER wcs
 WORKDIR /app
 
@@ -54,11 +60,16 @@ WORKDIR /app
 # Health check
 # ------------------------------------------------------------------
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:8000/api/v1/health || exit 1
+    CMD /app/healthcheck.sh
 
 # ------------------------------------------------------------------
 # Run
 # ------------------------------------------------------------------
 EXPOSE 8000
 
+# ENTRYPOINT needs root to copy Let's Encrypt certs (privkey.pem is 0600 root:root).
+# It drops privileges to 'wcs' via gosu before launching the CMD.
+# HEALTHCHECK above was defined under USER wcs so it still runs as wcs.
+USER root
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
