@@ -166,6 +166,10 @@ async def get_tts_config(request: Request):
         engine=tts.engine,
         zalo_speaker_id=tts.zalo_speaker_id,
         zalo_speed=tts.zalo_speed,
+        rv_gender=tts.rv_gender,
+        rv_rate=tts.rv_rate,
+        rv_pitch=tts.rv_pitch,
+        rv_configured=bool(tts.rv_api_key and tts.rv_site_id),
     )
 
 
@@ -186,6 +190,12 @@ async def update_tts_config(request: Request, body: TtsConfigUpdate):
         tts.zalo_speaker_id = body.zalo_speaker_id
     if body.zalo_speed is not None:
         tts.zalo_speed = body.zalo_speed
+    if body.rv_gender is not None:
+        tts.rv_gender = body.rv_gender
+    if body.rv_rate is not None:
+        tts.rv_rate = body.rv_rate
+    if body.rv_pitch is not None:
+        tts.rv_pitch = body.rv_pitch
 
     # Validate the merged config
     errors = request.app.state.config.validate()
@@ -199,6 +209,10 @@ async def update_tts_config(request: Request, body: TtsConfigUpdate):
         engine=tts.engine,
         zalo_speaker_id=tts.zalo_speaker_id,
         zalo_speed=tts.zalo_speed,
+        rv_gender=tts.rv_gender,
+        rv_rate=tts.rv_rate,
+        rv_pitch=tts.rv_pitch,
+        rv_configured=bool(tts.rv_api_key and tts.rv_site_id),
     )
 
 

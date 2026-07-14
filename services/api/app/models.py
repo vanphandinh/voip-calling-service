@@ -127,8 +127,8 @@ class TtsConfigUpdate(BaseModel):
 
     engine: Optional[str] = Field(
         default=None,
-        description="TTS engine: 'gtts', 'zalo', or 'espeak'",
-        pattern="^(gtts|zalo|espeak)$",
+        description="TTS engine: 'gtts', 'zalo', 'espeak', or 'responsivevoice'",
+        pattern="^(gtts|zalo|espeak|responsivevoice)$",
     )
     zalo_speaker_id: Optional[int] = Field(
         default=None,
@@ -141,6 +141,23 @@ class TtsConfigUpdate(BaseModel):
         ge=0.8,
         le=1.2,
         description="Speech speed factor (0.8 - 1.2)",
+    )
+    rv_gender: Optional[str] = Field(
+        default=None,
+        pattern="^(male|female)$",
+        description="ResponsiveVoice gender: 'male' or 'female'",
+    )
+    rv_rate: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="ResponsiveVoice speech rate (0.0 - 2.0)",
+    )
+    rv_pitch: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="ResponsiveVoice voice pitch (0.0 - 2.0)",
     )
 
 
@@ -160,8 +177,12 @@ class TtsConfigResponse(BaseModel):
     engine: str
     zalo_speaker_id: int
     zalo_speed: float
+    rv_gender: str = ""
+    rv_rate: float = 1.0
+    rv_pitch: float = 1.0
+    rv_configured: bool = False
     available_engines: list[str] = Field(
-        default_factory=lambda: ["gtts", "zalo", "espeak"]
+        default_factory=lambda: ["gtts", "zalo", "espeak", "responsivevoice"]
     )
     zalo_voices: list[ZaloVoiceInfo] = Field(
         default_factory=lambda: list(ZALO_VOICES)

@@ -38,6 +38,9 @@ class TTSService:
     _ZALO_PAGE_URL = "https://ai.zalo.solutions/products/text-to-audio-converter"
     _ZALO_API_URL = "https://ai.zalo.solutions/api/demo/v1/tts/synthesize"
 
+    # ResponsiveVoice API constants
+    _RV_API_URL = "https://texttospeech.responsivevoice.org/v2/text/synthesize"
+
     def __init__(self, config: TtsConfig) -> None:
         self._config = config
         self._zalo_cookie: Optional[str] = None
@@ -49,12 +52,18 @@ class TTSService:
     def _cache_key(self, text: str) -> str:
         """Build a deterministic cache key from text + current TTS config.
 
-        Only Zalo includes speaker_id/speed in the key because those affect
-        the output.  gTTS and espeak have no variable voice parameters.
+        Zalo includes speaker_id/speed; ResponsiveVoice includes
+        gender/rate/pitch because those affect the output.
+        gTTS and espeak have no variable voice parameters.
         """
         engine = self._config.engine
         if engine == "zalo":
             raw = f"{text}|zalo|{self._config.zalo_speaker_id}|{self._config.zalo_speed}"
+        elif engine == "responsivevoice":
+            raw = (
+                f"{text}|responsivevoice|{self._config.rv_gender}"
+                f"|{self._config.rv_rate}|{self._config.rv_pitch}"
+            )
         else:
             raw = f"{text}|{engine}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -78,10 +87,11 @@ class TTSService:
             "gtts": ("gTTS", self._synthesize_gtts),
             "zalo": ("Zalo", self._synthesize_zalo),
             "espeak": ("espeak", self._synthesize_espeak),
+            "responsivevoice": ("ResponsiveVoice", self._synthesize_responsivevoice),
         }
         primary = self._config.engine
         order = [primary]
-        for eng in ("gtts", "zalo", "espeak"):
+        for eng in ("zalo", "responsivevoice", "gtts", "espeak"):
             if eng not in order:
                 order.append(eng)
         return [engine_map[eng] for eng in order if eng in engine_map]
@@ -660,6 +670,104 @@ class TTSService:
 
         logger.info("espeak-ng WAV written to %s", output_path)
         return output_path
+
+    def _synthesize_responsivevoice(self, text: str, output_path: Path) -> Path:
+        """Synthesize using ResponsiveVoice TTS API.
+
+        Uses POST /v2/text/synthesize with JSON body.
+        Language is hardcoded to Vietnamese (vi-VN).
+        Returns 8kHz 16-bit mono WAV.
+        """
+        logger.info(
+            "Synthesizing with ResponsiveVoice (gender=%s): '%s...' (%d chars)",
+            self._config.rv_gender or "default",
+            text[:60],
+            len(text),
+        )
+
+        # Build payload — lang is hardcoded to vi-VN
+        payload: dict = {
+            "text": text,
+            "lang": "vi-VN",
+            "format": "mp3",
+        }
+        if self._config.rv_gender:
+            payload["gender"] = self._config.rv_gender
+        if self._config.rv_rate != 1.0:
+            payload["rate"] = self._config.rv_rate
+        if self._config.rv_pitch != 1.0:
+            payload["pitch"] = self._config.rv_pitch
+
+        headers = {
+            "X-API-Key": self._config.rv_site_id,
+            "X-API-Secret": self._config.rv_api_key,
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self._RV_API_URL,
+            data=data,
+            headers=headers,
+            method="POST",
+        )
+
+        for attempt in range(2):  # initial + 1 retry on 429
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = resp.read()
+            except urllib.request.HTTPError as exc:
+                if exc.code == 429:
+                    retry_after = exc.headers.get("Retry-After")
+                    delay = int(retry_after) if retry_after else 5
+                    if attempt == 0:
+                        logger.warning(
+                            "ResponsiveVoice rate limited (429), "
+                            "retrying after %ds",
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    raise TTSException(
+                        f"ResponsiveVoice rate limited (429) — "
+                        f"retry failed after {delay}s"
+                    ) from exc
+                # Try to parse error body
+                try:
+                    err_json = json.loads(exc.read().decode())
+                    err_msg = err_json.get("error", {}).get("message", str(exc))
+                except Exception:
+                    err_msg = str(exc)
+                raise TTSException(
+                    f"ResponsiveVoice API error (HTTP {exc.code}): {err_msg}"
+                ) from exc
+            except urllib.request.URLError as exc:
+                raise TTSException(
+                    f"ResponsiveVoice API request failed (network): {exc}"
+                ) from exc
+
+            # Success — write mp3 then convert to WAV
+            mp3_path = output_path.with_suffix(".mp3")
+            try:
+                mp3_path.write_bytes(body)
+                self._convert_to_wav(mp3_path, output_path)
+            finally:
+                try:
+                    mp3_path.unlink()
+                except OSError:
+                    pass
+
+            if not output_path.exists() or output_path.stat().st_size < 100:
+                raise TTSException(
+                    "ResponsiveVoice returned empty or invalid audio"
+                )
+
+            logger.info("ResponsiveVoice WAV written to %s", output_path)
+            return output_path
+
+        # Should not reach here (retry loop exits via return or raise)
+        raise TTSException("ResponsiveVoice synthesis failed after retries")
 
     # ------------------------------------------------------------------
     # Helpers

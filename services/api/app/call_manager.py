@@ -166,12 +166,7 @@ class CallManager:
             config: A :class:`TtsConfig` instance with the new settings.
         """
         self._tts.update_config(config)
-        logger.info(
-            "TTS config updated: engine=%s, speaker=%d, speed=%.1f",
-            config.engine,
-            config.zalo_speaker_id,
-            config.zalo_speed,
-        )
+        logger.info("TTS config updated: engine=%s", config.engine)
 
     def cleanup_tts_cache(self, max_age_days: int) -> tuple[int, int]:
         """Delete expired TTS cache files.

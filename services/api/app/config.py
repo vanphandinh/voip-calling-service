@@ -65,9 +65,16 @@ class SipConfig:
 class TtsConfig:
     """Text-to-Speech configuration."""
 
-    engine: str = "gtts"  # gtts | zalo | espeak
+    engine: str = "gtts"  # gtts | zalo | espeak | responsivevoice
     zalo_speaker_id: int = 1  # Zalo voice ID (1-6)
     zalo_speed: float = 1.0   # Zalo speed (0.8-1.2)
+    # ResponsiveVoice
+    rv_api_key: str = ""     # API secret from dashboard → X-API-Secret header
+    rv_site_id: str = ""     # site identifier → X-API-Key header (required)
+    rv_gender: str = ""      # "male" | "female" | "" (API default)
+    rv_rate: float = 1.0     # speech speed 0.0-2.0
+    rv_pitch: float = 1.0    # voice pitch 0.0-2.0
+    # Cache
     tts_cache_enabled: bool = True
     tts_cache_dir: str = ""  # empty = use {audio_dir}/.tts_cache
     tts_cache_max_age_days: int = 30  # files older than this are cleaned up
@@ -83,6 +90,10 @@ class TtsConfig:
     @property
     def use_espeak(self) -> bool:
         return self.engine == "espeak"
+
+    @property
+    def use_responsivevoice(self) -> bool:
+        return self.engine == "responsivevoice"
 
 
 @dataclass
@@ -121,6 +132,11 @@ class AppConfig:
                 engine=os.getenv("TTS_ENGINE", "gtts"),
                 zalo_speaker_id=_env_int("ZALO_SPEAKER_ID", 1),
                 zalo_speed=_env_float("ZALO_SPEED", 1.0),
+                rv_api_key=os.getenv("RV_API_KEY", ""),
+                rv_site_id=os.getenv("RV_SITE_ID", ""),
+                rv_gender=os.getenv("RV_GENDER", ""),
+                rv_rate=_env_float("RV_RATE", 1.0),
+                rv_pitch=_env_float("RV_PITCH", 1.0),
                 tts_cache_enabled=os.getenv("TTS_CACHE_ENABLED", "true").lower() != "false",
                 tts_cache_dir=os.getenv("TTS_CACHE_DIR", ""),
                 tts_cache_max_age_days=_env_int("TTS_CACHE_MAX_AGE_DAYS", 30),
@@ -158,13 +174,26 @@ class AppConfig:
                     f"'{proxy_transport}'. Set SIP_TRANSPORT to '{proxy_transport}' or "
                     f"remove ';transport=' from SIP_PROXY."
                 )
-        if self.tts.engine not in ("gtts", "zalo", "espeak"):
-            errors.append("TTS_ENGINE must be 'gtts', 'zalo', or 'espeak'")
+        if self.tts.engine not in ("gtts", "zalo", "espeak", "responsivevoice"):
+            errors.append(
+                "TTS_ENGINE must be 'gtts', 'zalo', 'espeak', or 'responsivevoice'"
+            )
         if self.tts.engine == "zalo":
             if not (1 <= self.tts.zalo_speaker_id <= 6):
                 errors.append("ZALO_SPEAKER_ID must be between 1 and 6")
             if not (0.8 <= self.tts.zalo_speed <= 1.2):
                 errors.append("ZALO_SPEED must be between 0.8 and 1.2")
+        if self.tts.engine == "responsivevoice":
+            if not self.tts.rv_api_key:
+                errors.append("RV_API_KEY is required when TTS_ENGINE=responsivevoice")
+            if not self.tts.rv_site_id:
+                errors.append("RV_SITE_ID is required when TTS_ENGINE=responsivevoice")
+            if self.tts.rv_gender and self.tts.rv_gender not in ("male", "female"):
+                errors.append("RV_GENDER must be 'male' or 'female'")
+            if not (0.0 <= self.tts.rv_rate <= 2.0):
+                errors.append("RV_RATE must be between 0.0 and 2.0")
+            if not (0.0 <= self.tts.rv_pitch <= 2.0):
+                errors.append("RV_PITCH must be between 0.0 and 2.0")
         if not self.secret_key:
             logger.warning(
                 "SECRET_KEY is not set — API token authentication is disabled. "

@@ -33,6 +33,12 @@ services:
       - TTS_ENGINE=${TTS_ENGINE:-gtts}
       - ZALO_SPEAKER_ID=${ZALO_SPEAKER_ID:-1}
       - ZALO_SPEED=${ZALO_SPEED:-1.0}
+      # ResponsiveVoice TTS
+      - RV_API_KEY=${RV_API_KEY:-}
+      - RV_SITE_ID=${RV_SITE_ID:-}
+      - RV_GENDER=${RV_GENDER:-}
+      - RV_RATE=${RV_RATE:-1.0}
+      - RV_PITCH=${RV_PITCH:-1.0}
       # TTS Cache
       - TTS_CACHE_ENABLED=${TTS_CACHE_ENABLED:-true}
       - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/audio/.tts_cache}

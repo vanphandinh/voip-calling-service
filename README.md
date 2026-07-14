@@ -15,8 +15,8 @@ External Apps (REST API)
 ┌───────────────────────┐     ┌──────────────────────────┐
 │   Calling API (8000)  │────▶│  sip.linphone.org (5061) │
 │   FastAPI + SIP socket│     │  SIP Proxy + Push        │
-│   + TTS (gTTS/Zalo/   │     └──────────┬───────────────┘
-│         espeak)       │                │
+│   + TTS (RV/Zalo/     │     └──────────┬───────────────┘
+│    gTTS/espeak)       │                │
 └───────────────────────┘                │
                               Push notification + SIP call
                                          │
@@ -136,11 +136,12 @@ curl -X POST http://localhost:8000/api/v1/call \
 
 ## Chọn giọng nói & Engine TTS
 
-Dịch vụ hỗ trợ 3 engine TTS, có thể đổi runtime qua API mà không cần restart:
+Dịch vụ hỗ trợ 4 engine TTS, có thể đổi runtime qua API mà không cần restart:
 
 | Engine | Chất lượng | Internet | Ghi chú |
 |--------|-----------|----------|---------|
 | `zalo` | ⭐⭐⭐⭐⭐ | Cần | 6 giọng tự nhiên (Nam/Nữ × Bắc/Nam), tốt nhất |
+| `responsivevoice` | ⭐⭐⭐⭐ | Cần | ResponsiveVoice API, giọng tiếng Việt, cần API key |
 | `gtts` | ⭐⭐⭐⭐ | Cần | Google TTS tiếng Việt |
 | `espeak` | ⭐⭐ | Không | Offline, giọng robot |
 
@@ -155,6 +156,27 @@ Dịch vụ hỗ trợ 3 engine TTS, có thể đổi runtime qua API mà không
 | 5 | Nữ | Miền Bắc |
 | 6 | Nữ | Miền Nam |
 
+### ResponsiveVoice — giọng tiếng Việt
+
+Cần đăng ký API key tại [responsivevoice.org](https://responsivevoice.org). Vào dashboard
+→ "Server-to-server API secrets" để tạo secret. Gói miễn phí: **1 triệu ký tự/tháng** (~5,000 cuộc gọi).
+
+Cần **2 credentials** từ dashboard:
+- **Site ID** (`RV_SITE_ID`): auto-generated, hiển thị trong dashboard
+- **API Secret** (`RV_API_KEY`): tạo thủ công, chỉ hiển thị 1 lần
+
+```env
+# .env
+TTS_ENGINE=responsivevoice
+RV_API_KEY=<api-secret-tu-dashboard>
+RV_SITE_ID=<site-id-tu-dashboard>
+RV_GENDER=female      # tùy chọn: male, female, hoặc để trống
+RV_RATE=1.0           # tốc độ đọc 0.0-2.0 (mặc định 1.0)
+RV_PITCH=1.0          # cao độ giọng 0.0-2.0 (mặc định 1.0)
+```
+
+Ngôn ngữ được hardcode là `vi-VN`. Các tham số `rate` và `pitch` chỉ gửi lên API khi khác 1.0.
+
 ```bash
 # Xem cấu hình TTS hiện tại
 curl http://localhost:8000/api/v1/tts/config
@@ -164,18 +186,23 @@ curl -X PUT http://localhost:8000/api/v1/tts/config \
   -H "Content-Type: application/json" \
   -d '{"engine": "zalo", "zalo_speaker_id": 4}'
 
+# Đổi sang ResponsiveVoice + giọng nữ
+curl -X PUT http://localhost:8000/api/v1/tts/config \
+  -H "Content-Type: application/json" \
+  -d '{"engine": "responsivevoice", "rv_gender": "female"}'
+
 # Đổi sang Google TTS
 curl -X PUT http://localhost:8000/api/v1/tts/config \
   -H "Content-Type: application/json" \
   -d '{"engine": "gtts"}'
 
-# Chỉ đổi tốc độ nói
+# Chỉ đổi tốc độ nói (ResponsiveVoice)
 curl -X PUT http://localhost:8000/api/v1/tts/config \
   -H "Content-Type: application/json" \
-  -d '{"zalo_speed": 1.2}'
+  -d '{"rv_rate": 1.3, "rv_pitch": 1.1}'
 ```
 
-> **Fallback chain**: Khi engine chính lỗi, hệ thống tự động thử: engine đã config → gTTS → espeak. Điều này đảm bảo cuộc gọi luôn được thực hiện ngay cả khi mất internet.
+> **Fallback chain**: Khi engine chính lỗi, hệ thống tự động thử: engine đã config → Zalo → ResponsiveVoice → gTTS → espeak. Điều này đảm bảo cuộc gọi luôn được thực hiện ngay cả khi mất internet.
 
 ## Quản lý cache TTS
 
@@ -225,15 +252,23 @@ curl -X DELETE http://localhost:8000/api/v1/tts/cache
 | `SIP_PROXY` | `sip:sip.linphone.org:5061;transport=tls` | SIP proxy |
 | `RTP_PORT_MIN` | `10000` | Port RTP bắt đầu |
 | `RTP_PORT_MAX` | `10020` | Port RTP kết thúc |
-| `TTS_ENGINE` | `gtts` | Engine TTS: `gtts`, `zalo`, `espeak` |
+| `TTS_ENGINE` | `gtts` | Engine TTS: `responsivevoice`, `zalo`, `gtts`, `espeak` |
 | `ZALO_SPEAKER_ID` | `1` | Giọng Zalo (1-6), chỉ dùng khi `TTS_ENGINE=zalo` |
 | `ZALO_SPEED` | `1.0` | Tốc độ nói Zalo (0.8 - 1.2) |
+| `RV_API_KEY` | *(bắt buộc)* | API Secret ResponsiveVoice, tạo trong dashboard |
+| `RV_SITE_ID` | *(bắt buộc)* | Site ID ResponsiveVoice, hiển thị trong dashboard |
+| `RV_GENDER` | *(trống)* | Giọng ResponsiveVoice: `male`, `female`, hoặc để trống |
+| `RV_RATE` | `1.0` | Tốc độ đọc ResponsiveVoice (0.0 - 2.0) |
+| `RV_PITCH` | `1.0` | Cao độ giọng ResponsiveVoice (0.0 - 2.0) |
 | `CALL_TIMEOUT` | `30` | Thời gian tối đa mỗi cuộc gọi (giây) |
 | `TTS_CACHE_ENABLED` | `true` | Bật/tắt cache audio TTS (`true`/`false`) |
 | `TTS_CACHE_DIR` | *(hệ thống)* | Thư mục cache, mặc định `%TEMP%/wcs_tts_cache/` |
 | `TTS_CACHE_MAX_AGE_DAYS` | `30` | Số ngày tối đa file cache được giữ, file cũ hơn bị xóa khi gọi `DELETE /api/v1/tts/cache` |
 | `API_PORT` | `8000` | Cổng API HTTP |
 | `LOG_LEVEL` | `INFO` | Log level |
+| `SECRET_KEY` | *(trống)* | Khóa chính để ký access token. Nếu trống, auth bị vô hiệu |
+| `SSL_ENABLED` | *(trống)* | Bật HTTPS (`true`/`false`). Nếu trống, tự động phát hiện cert |
+| `SSL_DOMAIN` | *(trống)* | Tên miền cho Let's Encrypt SSL |
 
 ## Tích hợp từ app khác
 
@@ -305,7 +340,7 @@ voip-calling-service/
 │           ├── routes.py           # API endpoints
 │           ├── call_manager.py     # Call orchestration
 │           ├── sip_controller.py   # SIP signaling (Python socket + TLS)
-│           └── tts_service.py      # TTS (gTTS + Zalo + espeak)
+│           └── tts_service.py      # TTS (RV + Zalo + gTTS + espeak)
 ```
 
 ## Xử lý lỗi thường gặp
@@ -316,7 +351,8 @@ voip-calling-service/
 | `call failed: 404` | Target chưa đăng ký trên linphone.org | Kiểm tra target đúng username, iPhone đang Connected |
 | `call failed: 408` | Không trả lời | iPhone không online hoặc không nhận push |
 | `gTTS failed` | Không có internet | Đổi `TTS_ENGINE=zalo` hoặc `espeak` |
-| `Zalo failed` | Cookie hết hạn hoặc API quá tải | Tự động retry + fallback xuống gTTS → espeak |
+| `Zalo failed` | Cookie hết hạn hoặc API quá tải | Tự động retry + fallback xuống engine tiếp theo |
+| `ResponsiveVoice failed` | API key sai, hết quota (429), hoặc mất mạng | Tự động retry 1 lần nếu 429 + fallback xuống Zalo → gTTS → espeak |
 | **Điện thoại đổ chuông nhưng không nghe âm thanh** | RTP port bị chặn | Mở UDP ports 10000-10020 trên firewall |
 
 ## License
