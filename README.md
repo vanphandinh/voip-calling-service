@@ -15,7 +15,7 @@ External Apps (REST API)
 ┌───────────────────────┐     ┌──────────────────────────┐
 │   Calling API (8000)  │────▶│  sip.linphone.org (5061) │
 │   FastAPI + SIP socket│     │  SIP Proxy + Push        │
-│   + TTS (VieNeu/Zalo/ │     └──────────┬───────────────┘
+│   + TTS (Valtec/Zalo/ │     └──────────┬───────────────┘
 │    RV/gTTS/espeak)     │                │
 └───────────────────────┘                │
                               Push notification + SIP call
@@ -140,7 +140,7 @@ Dịch vụ hỗ trợ 5 engine TTS, có thể đổi runtime qua API mà không
 
 | Engine | Chất lượng | Internet | Ghi chú |
 |--------|-----------|----------|---------|
-| `vieneu` | ⭐⭐⭐⭐⭐ | Cần | VieNeu-TTS-v3-Turbo, 14 giọng tự nhiên, GPU |
+| `valtec` | ⭐⭐⭐⭐⭐ | Cần | Valtec Vietnamese TTS, 5 giọng (NF/SF/NM1/NM2/SM), native speed |
 | `zalo` | ⭐⭐⭐⭐⭐ | Cần | 6 giọng tự nhiên (Nam/Nữ × Bắc/Nam), tốt nhất |
 | `responsivevoice` | ⭐⭐⭐⭐ | Cần | ResponsiveVoice API, giọng tiếng Việt, cần API key |
 | `gtts` | ⭐⭐⭐⭐ | Cần | Google TTS tiếng Việt |
@@ -203,41 +203,45 @@ curl -X PUT http://localhost:8000/api/v1/tts/config \
   -d '{"rv_rate": 1.3, "rv_pitch": 1.1}'
 ```
 
-### VieNeu — 14 giọng tiếng Việt (HuggingFace Space)
+### Valtec — 5 giọng tiếng Việt (HuggingFace Space)
 
-Sử dụng model VieNeu-TTS-v3-Turbo chạy trên HuggingFace ZeroGPU Space.
-**Cold start**: lần gọi đầu tiên có thể mất 30-60 giây để khởi động GPU.
+Sử dụng model Valtec Vietnamese TTS chạy trên HuggingFace Space.
+Hỗ trợ speed control native (length_scale), không cần xử lý hậu kỳ.
 
 ```env
 # .env
-TTS_ENGINE=vieneu
-VIENEU_VOICE=Phạm Tuyên     # 1 trong 14 giọng (xem danh sách bên dưới)
-VIENEU_HF_TOKEN=             # HuggingFace token (tùy chọn, chỉ cần nếu Space bị gated)
-VIENEU_SPEED=1.0             # tốc độ đọc, áp dụng qua ffmpeg atempo (0.5-2.0)
+TTS_ENGINE=valtec
+VALTEC_VOICE=NF              # speaker: NF, SF, NM1, NM2, SM
+VALTEC_HF_TOKEN=             # HuggingFace token (tùy chọn, chỉ cần nếu Space bị gated)
+VALTEC_SPEED=1.0             # tốc độ đọc native (0.5-2.0)
 ```
 
-**14 giọng preset:**
+**5 speakers:**
 
-| Giọng nam | Giọng nữ |
-|-----------|----------|
-| Minh Đức, Thái Sơn, Xuân Vĩnh, Thanh Bình, Minh Triết, Quang Sơn | Phạm Tuyên, Trúc Ly, Ngọc Linh, Đoan Trang, Mai Anh, Thục Đoan, Thùy Dung, Ngọc Trân |
+| ID | Mô tả |
+|----|-------|
+| NF | Northern Female (Nữ miền Bắc) |
+| SF | Southern Female (Nữ miền Nam) |
+| NM1 | Northern Male 1 (Nam miền Bắc 1) |
+| NM2 | Northern Male 2 (Nam miền Bắc 2) |
+| SM | Southern Male (Nam miền Nam) |
 
-> **Tốc độ đọc**: Model không hỗ trợ speed control trực tiếp. `VIENEU_SPEED` được áp dụng qua
-> ffmpeg `atempo` filter sau khi synthesize (0.5 = chậm một nửa, 2.0 = nhanh gấp đôi).
+> **Tốc độ đọc**: Model hỗ trợ speed control trực tiếp qua tham số `length_scale`.
+> `VALTEC_SPEED` được gửi thẳng lên model (0.5 = chậm, 1.0 = bình thường, 2.0 = nhanh).
 
 ```bash
-# Đổi sang VieNeu + giọng nữ
+# Đổi sang Valtec + giọng nam miền Nam
 curl -X PUT http://localhost:8000/api/v1/tts/config \
   -H "Content-Type: application/json" \
-  -d '{"engine": "vieneu", "vieneu_voice": "Thục Đoan", "vieneu_speed": 0.8}'
+  -d '{"engine": "valtec", "valtec_voice": "SM", "valtec_speed": 0.8}'
 
-# Đổi giọng nam
+# Đổi giọng nữ miền Bắc
 curl -X PUT http://localhost:8000/api/v1/tts/config \
   -H "Content-Type: application/json" \
-  -d '{"engine": "vieneu", "vieneu_voice": "Minh Đức"}'
+  -d '{"engine": "valtec", "valtec_voice": "NF"}'
 ```
 
-> **Fallback chain**: Khi engine chính lỗi, hệ thống tự động thử: engine đã config → Zalo → VieNeu → ResponsiveVoice → gTTS → espeak. Điều này đảm bảo cuộc gọi luôn được thực hiện ngay cả khi mất internet.
+> **Fallback chain**: Khi engine chính lỗi, hệ thống tự động thử: engine đã config → Zalo → Valtec → ResponsiveVoice → gTTS → espeak. Điều này đảm bảo cuộc gọi luôn được thực hiện ngay cả khi mất internet.
 
 ## Quản lý cache TTS
 
@@ -287,12 +291,12 @@ curl -X DELETE http://localhost:8000/api/v1/tts/cache
 | `SIP_PROXY` | `sip:sip.linphone.org:5061;transport=tls` | SIP proxy |
 | `RTP_PORT_MIN` | `10000` | Port RTP bắt đầu |
 | `RTP_PORT_MAX` | `10020` | Port RTP kết thúc |
-| `TTS_ENGINE` | `gtts` | Engine TTS: `vieneu`, `zalo`, `responsivevoice`, `gtts`, `espeak` |
+| `TTS_ENGINE` | `gtts` | Engine TTS: `valtec`, `zalo`, `responsivevoice`, `gtts`, `espeak` |
 | `ZALO_SPEAKER_ID` | `1` | Giọng Zalo (1-6), chỉ dùng khi `TTS_ENGINE=zalo` |
 | `ZALO_SPEED` | `1.0` | Tốc độ nói Zalo (0.8 - 1.2) |
-| `VIENEU_VOICE` | `Phạm Tuyên` | Giọng VieNeu (14 giọng preset), chỉ dùng khi `TTS_ENGINE=vieneu` |
-| `VIENEU_HF_TOKEN` | *(trống)* | HuggingFace token (tùy chọn), tạo tại https://huggingface.co/settings/tokens |
-| `VIENEU_SPEED` | `1.0` | Tốc độ đọc VieNeu, áp dụng qua ffmpeg atempo (0.5 - 2.0) |
+| `VALTEC_VOICE` | `NF` | Speaker Valtec (NF/SF/NM1/NM2/SM), chỉ dùng khi `TTS_ENGINE=valtec` |
+| `VALTEC_HF_TOKEN` | *(trống)* | HuggingFace token (tùy chọn), tạo tại https://huggingface.co/settings/tokens |
+| `VALTEC_SPEED` | `1.0` | Tốc độ đọc native (0.5 - 2.0) |
 | `RV_API_KEY` | *(bắt buộc)* | API Secret ResponsiveVoice, tạo trong dashboard |
 | `RV_SITE_ID` | *(bắt buộc)* | Site ID ResponsiveVoice, hiển thị trong dashboard |
 | `RV_GENDER` | *(trống)* | Giọng ResponsiveVoice: `male`, `female`, hoặc để trống |
@@ -378,7 +382,7 @@ voip-calling-service/
 │           ├── routes.py           # API endpoints
 │           ├── call_manager.py     # Call orchestration
 │           ├── sip_controller.py   # SIP signaling (Python socket + TLS)
-│           └── tts_service.py      # TTS (VieNeu + Zalo + RV + gTTS + espeak)
+│           └── tts_service.py      # TTS (Valtec + Zalo + RV + gTTS + espeak)
 ```
 
 ## Xử lý lỗi thường gặp
@@ -391,7 +395,7 @@ voip-calling-service/
 | `gTTS failed` | Không có internet | Đổi `TTS_ENGINE=zalo` hoặc `espeak` |
 | `Zalo failed` | Cookie hết hạn hoặc API quá tải | Tự động retry + fallback xuống engine tiếp theo |
 | `ResponsiveVoice failed` | API key sai, hết quota (429), hoặc mất mạng | Tự động retry 1 lần nếu 429 + fallback |
-| `VieNeu failed` | ZeroGPU cold start (>60s), Space quá tải, hoặc mất mạng | Tự động fallback xuống Zalo → ResponsiveVoice → gTTS → espeak |
+| `Valtec failed` | Space quá tải hoặc mất mạng | Tự động fallback xuống Zalo → ResponsiveVoice → gTTS → espeak |
 | **Điện thoại đổ chuông nhưng không nghe âm thanh** | RTP port bị chặn | Mở UDP ports 10000-10020 trên firewall |
 
 ## License
