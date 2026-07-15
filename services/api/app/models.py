@@ -164,10 +164,6 @@ class TtsConfigUpdate(BaseModel):
         min_length=1,
         description="VieNeu preset voice name (e.g. 'Phạm Tuyên', 'Minh Đức')",
     )
-    vieneu_hf_token: Optional[str] = Field(
-        default=None,
-        description="HuggingFace token for gated Spaces (optional)",
-    )
     vieneu_speed: Optional[float] = Field(
         default=None,
         ge=0.5,
@@ -197,7 +193,6 @@ class TtsConfigResponse(BaseModel):
     rv_pitch: float = 1.0
     rv_configured: bool = False
     vieneu_voice: str = "Phạm Tuyên"
-    vieneu_hf_token: str = ""
     vieneu_speed: float = 1.0
     available_engines: list[str] = Field(
         default_factory=lambda: ["gtts", "zalo", "espeak", "responsivevoice", "vieneu"]
