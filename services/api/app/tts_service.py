@@ -28,6 +28,11 @@ from .config import TtsConfig
 
 logger = logging.getLogger("wcs.tts")
 
+# Suppress noisy httpx / gradio_client heartbeat logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("gradio_client").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+
 
 class TTSException(Exception):
     """Raised when TTS synthesis fails."""
@@ -801,18 +806,13 @@ class TTSService:
                 "Install it with: pip install gradio-client"
             ) from exc
 
+        hf_token = self._config.valtec_hf_token or None
+        client = None
         try:
-            hf_token = self._config.valtec_hf_token or None
             client = Client(
                 "valtecAI-team/valtec-vietnamese-tts",
                 hf_token=hf_token,
             )
-        except Exception as exc:
-            raise TTSException(
-                f"Failed to connect to Valtec Space: {exc}"
-            ) from exc
-
-        try:
             result = client.predict(
                 text,
                 self._config.valtec_voice,   # speaker
@@ -826,6 +826,12 @@ class TTSService:
             raise TTSException(
                 f"Valtec synthesis failed: {exc}"
             ) from exc
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
         # result is (audio_file_path, sample_rate)
         audio_path = Path(str(result[0]))
