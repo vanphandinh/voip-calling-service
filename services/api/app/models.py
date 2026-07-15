@@ -127,8 +127,8 @@ class TtsConfigUpdate(BaseModel):
 
     engine: Optional[str] = Field(
         default=None,
-        description="TTS engine: 'gtts', 'zalo', 'espeak', or 'responsivevoice'",
-        pattern="^(gtts|zalo|espeak|responsivevoice)$",
+        description="TTS engine: 'gtts', 'zalo', 'espeak', 'responsivevoice', or 'vieneu'",
+        pattern="^(gtts|zalo|espeak|responsivevoice|vieneu)$",
     )
     zalo_speaker_id: Optional[int] = Field(
         default=None,
@@ -159,6 +159,21 @@ class TtsConfigUpdate(BaseModel):
         le=2.0,
         description="ResponsiveVoice voice pitch (0.0 - 2.0)",
     )
+    vieneu_voice: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="VieNeu preset voice name (e.g. 'Phạm Tuyên', 'Minh Đức')",
+    )
+    vieneu_hf_token: Optional[str] = Field(
+        default=None,
+        description="HuggingFace token for gated Spaces (optional)",
+    )
+    vieneu_speed: Optional[float] = Field(
+        default=None,
+        ge=0.5,
+        le=2.0,
+        description="Speech speed (0.5 = half speed, 1.0 = normal, 2.0 = double)",
+    )
 
 
 ZALO_VOICES: list[ZaloVoiceInfo] = [
@@ -181,8 +196,11 @@ class TtsConfigResponse(BaseModel):
     rv_rate: float = 1.0
     rv_pitch: float = 1.0
     rv_configured: bool = False
+    vieneu_voice: str = "Phạm Tuyên"
+    vieneu_hf_token: str = ""
+    vieneu_speed: float = 1.0
     available_engines: list[str] = Field(
-        default_factory=lambda: ["gtts", "zalo", "espeak", "responsivevoice"]
+        default_factory=lambda: ["gtts", "zalo", "espeak", "responsivevoice", "vieneu"]
     )
     zalo_voices: list[ZaloVoiceInfo] = Field(
         default_factory=lambda: list(ZALO_VOICES)

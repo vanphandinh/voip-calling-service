@@ -170,6 +170,9 @@ async def get_tts_config(request: Request):
         rv_rate=tts.rv_rate,
         rv_pitch=tts.rv_pitch,
         rv_configured=bool(tts.rv_api_key and tts.rv_site_id),
+        vieneu_voice=tts.vieneu_voice,
+        vieneu_hf_token="***" if tts.vieneu_hf_token else "",
+        vieneu_speed=tts.vieneu_speed,
     )
 
 
@@ -196,6 +199,12 @@ async def update_tts_config(request: Request, body: TtsConfigUpdate):
         tts.rv_rate = body.rv_rate
     if body.rv_pitch is not None:
         tts.rv_pitch = body.rv_pitch
+    if body.vieneu_voice is not None:
+        tts.vieneu_voice = body.vieneu_voice
+    if body.vieneu_hf_token is not None:
+        tts.vieneu_hf_token = body.vieneu_hf_token
+    if body.vieneu_speed is not None:
+        tts.vieneu_speed = body.vieneu_speed
 
     # Validate the merged config
     errors = request.app.state.config.validate()
@@ -213,6 +222,9 @@ async def update_tts_config(request: Request, body: TtsConfigUpdate):
         rv_rate=tts.rv_rate,
         rv_pitch=tts.rv_pitch,
         rv_configured=bool(tts.rv_api_key and tts.rv_site_id),
+        vieneu_voice=tts.vieneu_voice,
+        vieneu_hf_token="***" if tts.vieneu_hf_token else "",
+        vieneu_speed=tts.vieneu_speed,
     )
 
 

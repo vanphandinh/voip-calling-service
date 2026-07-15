@@ -39,6 +39,10 @@ services:
       - RV_GENDER=${RV_GENDER:-}
       - RV_RATE=${RV_RATE:-1.0}
       - RV_PITCH=${RV_PITCH:-1.0}
+      # VieNeu TTS (HuggingFace Space)
+      - VIENEU_VOICE=${VIENEU_VOICE:-Phạm Tuyên}
+      - VIENEU_HF_TOKEN=${VIENEU_HF_TOKEN:-}
+      - VIENEU_SPEED=${VIENEU_SPEED:-1.0}
       # TTS Cache
       - TTS_CACHE_ENABLED=${TTS_CACHE_ENABLED:-true}
       - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/audio/.tts_cache}

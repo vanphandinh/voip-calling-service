@@ -1,8 +1,10 @@
 """Vietnamese Text-to-Speech service.
 
 Supports multiple backends:
-- gTTS (Google Text-to-Speech): Cloud-based, best quality, requires internet.
+- VieNeu: HuggingFace Space, 14 Vietnamese voices, GPU-powered, best quality.
+- ResponsiveVoice: Cloud API, Vietnamese voices via responsivevoice.org.
 - Zalo AI TTS: 6 Vietnamese voices (Northern/Southern, Male/Female).
+- gTTS (Google Text-to-Speech): Cloud-based, best quality, requires internet.
 - espeak-ng: Offline fallback, robotic but always available.
 """
 
@@ -53,8 +55,8 @@ class TTSService:
         """Build a deterministic cache key from text + current TTS config.
 
         Zalo includes speaker_id/speed; ResponsiveVoice includes
-        gender/rate/pitch because those affect the output.
-        gTTS and espeak have no variable voice parameters.
+        gender/rate/pitch; VieNeu includes voice because those
+        affect the output.  gTTS and espeak have no variable voice parameters.
         """
         engine = self._config.engine
         if engine == "zalo":
@@ -64,6 +66,8 @@ class TTSService:
                 f"{text}|responsivevoice|{self._config.rv_gender}"
                 f"|{self._config.rv_rate}|{self._config.rv_pitch}"
             )
+        elif engine == "vieneu":
+            raw = f"{text}|vieneu|{self._config.vieneu_voice}|{self._config.vieneu_speed}"
         else:
             raw = f"{text}|{engine}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -88,10 +92,11 @@ class TTSService:
             "zalo": ("Zalo", self._synthesize_zalo),
             "espeak": ("espeak", self._synthesize_espeak),
             "responsivevoice": ("ResponsiveVoice", self._synthesize_responsivevoice),
+            "vieneu": ("VieNeu", self._synthesize_vieneu),
         }
         primary = self._config.engine
         order = [primary]
-        for eng in ("zalo", "responsivevoice", "gtts", "espeak"):
+        for eng in ("zalo", "vieneu", "responsivevoice", "gtts", "espeak"):
             if eng not in order:
                 order.append(eng)
         return [engine_map[eng] for eng in order if eng in engine_map]
@@ -768,6 +773,105 @@ class TTSService:
 
         # Should not reach here (retry loop exits via return or raise)
         raise TTSException("ResponsiveVoice synthesis failed after retries")
+
+    # ------------------------------------------------------------------
+    # VieNeu TTS backend (HuggingFace ZeroGPU Space)
+    # ------------------------------------------------------------------
+
+    def _synthesize_vieneu(self, text: str, output_path: Path) -> Path:
+        """Synthesize using VieNeu-TTS-v3-Turbo via Gradio client.
+
+        Calls the HuggingFace ZeroGPU Space using the ``gradio_client``
+        library, which handles cold starts, queuing, and websocket
+        communication automatically.
+
+        Voice and speed are configurable — all other synthesis
+        parameters use the model defaults. Speed is applied via
+        ffmpeg's atempo filter after synthesis.
+        """
+        logger.info(
+            "Synthesizing with VieNeu (voice=%s, speed=%.1f): '%s...' (%d chars)",
+            self._config.vieneu_voice, self._config.vieneu_speed, text[:60], len(text),
+        )
+
+        try:
+            from gradio_client import Client  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise TTSException(
+                "gradio_client is required for VieNeu TTS. "
+                "Install it with: pip install gradio-client"
+            ) from exc
+
+        try:
+            hf_token = self._config.vieneu_hf_token or None
+            client = Client(
+                "pnnbao-ump/VieNeu-TTS-v3-Turbo",
+                hf_token=hf_token,
+            )
+        except Exception as exc:
+            raise TTSException(
+                f"Failed to connect to VieNeu Space: {exc}"
+            ) from exc
+
+        try:
+            result = client.predict(
+                text,
+                self._config.vieneu_voice,
+                None,   # ref_audio — no voice cloning
+                0.8,    # temperature
+                25,     # top_k
+                0.95,   # top_p
+                1.2,    # repetition_penalty
+                300,    # max_new_frames
+                256,    # max_chars
+                api_name="/synthesize",
+            )
+        except Exception as exc:
+            raise TTSException(
+                f"VieNeu synthesis failed: {exc}"
+            ) from exc
+
+        # result is (audio_file_path, markdown_string)
+        audio_path = Path(str(result[0]))
+
+        # Convert to 8 kHz 16-bit mono PCM WAV
+        self._convert_to_wav(audio_path, output_path)
+
+        # Apply speed adjustment via ffmpeg atempo if speed != 1.0
+        speed = self._config.vieneu_speed
+        if speed != 1.0:
+            logger.info("Applying atempo filter: speed=%.2f", speed)
+            tempo_path = output_path.with_suffix(".tempo.wav")
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-v", "error",
+                        "-i", str(output_path),
+                        "-filter:a", f"atempo={speed}",
+                        "-ar", "8000",
+                        "-ac", "1",
+                        "-sample_fmt", "s16",
+                        str(tempo_path),
+                    ],
+                    check=True,
+                    timeout=30,
+                )
+                # Replace original with tempo-adjusted version
+                tempo_path.replace(output_path)
+            except FileNotFoundError:
+                raise TTSException(
+                    "ffmpeg is required for VieNeu speed adjustment but was not found"
+                )
+            except subprocess.CalledProcessError as exc:
+                raise TTSException(
+                    f"ffmpeg atempo filter failed: {exc}"
+                ) from exc
+
+        if not output_path.exists() or output_path.stat().st_size < 100:
+            raise TTSException("VieNeu produced empty or invalid audio")
+
+        logger.info("VieNeu WAV written to %s", output_path)
+        return output_path
 
     # ------------------------------------------------------------------
     # Helpers

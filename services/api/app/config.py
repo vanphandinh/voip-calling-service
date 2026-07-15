@@ -65,7 +65,7 @@ class SipConfig:
 class TtsConfig:
     """Text-to-Speech configuration."""
 
-    engine: str = "gtts"  # gtts | zalo | espeak | responsivevoice
+    engine: str = "gtts"  # gtts | zalo | espeak | responsivevoice | vieneu
     zalo_speaker_id: int = 1  # Zalo voice ID (1-6)
     zalo_speed: float = 1.0   # Zalo speed (0.8-1.2)
     # ResponsiveVoice
@@ -74,6 +74,10 @@ class TtsConfig:
     rv_gender: str = ""      # "male" | "female" | "" (API default)
     rv_rate: float = 1.0     # speech speed 0.0-2.0
     rv_pitch: float = 1.0    # voice pitch 0.0-2.0
+    # VieNeu
+    vieneu_voice: str = "Phạm Tuyên"  # preset voice name
+    vieneu_hf_token: str = ""  # HuggingFace token (for gated Spaces)
+    vieneu_speed: float = 1.0  # speech speed 0.5-2.0 (applied via ffmpeg atempo)
     # Cache
     tts_cache_enabled: bool = True
     tts_cache_dir: str = ""  # empty = use {audio_dir}/.tts_cache
@@ -94,6 +98,10 @@ class TtsConfig:
     @property
     def use_responsivevoice(self) -> bool:
         return self.engine == "responsivevoice"
+
+    @property
+    def use_vieneu(self) -> bool:
+        return self.engine == "vieneu"
 
 
 @dataclass
@@ -137,6 +145,9 @@ class AppConfig:
                 rv_gender=os.getenv("RV_GENDER", ""),
                 rv_rate=_env_float("RV_RATE", 1.0),
                 rv_pitch=_env_float("RV_PITCH", 1.0),
+                vieneu_voice=os.getenv("VIENEU_VOICE", "Phạm Tuyên"),
+                vieneu_hf_token=os.getenv("VIENEU_HF_TOKEN", ""),
+                vieneu_speed=_env_float("VIENEU_SPEED", 1.0),
                 tts_cache_enabled=os.getenv("TTS_CACHE_ENABLED", "true").lower() != "false",
                 tts_cache_dir=os.getenv("TTS_CACHE_DIR", ""),
                 tts_cache_max_age_days=_env_int("TTS_CACHE_MAX_AGE_DAYS", 30),
@@ -174,9 +185,9 @@ class AppConfig:
                     f"'{proxy_transport}'. Set SIP_TRANSPORT to '{proxy_transport}' or "
                     f"remove ';transport=' from SIP_PROXY."
                 )
-        if self.tts.engine not in ("gtts", "zalo", "espeak", "responsivevoice"):
+        if self.tts.engine not in ("gtts", "zalo", "espeak", "responsivevoice", "vieneu"):
             errors.append(
-                "TTS_ENGINE must be 'gtts', 'zalo', 'espeak', or 'responsivevoice'"
+                "TTS_ENGINE must be 'gtts', 'zalo', 'espeak', 'responsivevoice', or 'vieneu'"
             )
         if self.tts.engine == "zalo":
             if not (1 <= self.tts.zalo_speaker_id <= 6):
@@ -194,6 +205,11 @@ class AppConfig:
                 errors.append("RV_RATE must be between 0.0 and 2.0")
             if not (0.0 <= self.tts.rv_pitch <= 2.0):
                 errors.append("RV_PITCH must be between 0.0 and 2.0")
+        if self.tts.engine == "vieneu":
+            if not self.tts.vieneu_voice or not self.tts.vieneu_voice.strip():
+                errors.append("VIENEU_VOICE must be a non-empty string")
+            if not (0.5 <= self.tts.vieneu_speed <= 2.0):
+                errors.append("VIENEU_SPEED must be between 0.5 and 2.0")
         if not self.secret_key:
             logger.warning(
                 "SECRET_KEY is not set — API token authentication is disabled. "
