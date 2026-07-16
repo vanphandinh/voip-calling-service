@@ -3,7 +3,6 @@
 # ============================================================
 # Runtime dependencies:
 #   - ffmpeg        (TTS audio conversion + RTP streaming)
-#   - espeak-ng     (offline TTS fallback)
 #   - Python 3.11+  (API server + SIP signaling via raw sockets)
 # ============================================================
 
@@ -19,9 +18,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 # System dependencies
 # ------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # TTS fallback
-    espeak-ng \
-    espeak-ng-data \
     # TTS audio conversion + RTP streaming
     ffmpeg \
     # Utilities

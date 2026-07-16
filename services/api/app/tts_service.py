@@ -5,7 +5,7 @@ Supports multiple backends:
 - ResponsiveVoice: Cloud API, Vietnamese voices via responsivevoice.org.
 - Zalo AI TTS: 6 Vietnamese voices (Northern/Southern, Male/Female).
 - gTTS (Google Text-to-Speech): Cloud-based, best quality, requires internet.
-- espeak-ng: Offline fallback, robotic but always available.
+- TTSFree: Guest API from ttsfree.com, 48+ Vietnamese voices, no API key required.
 """
 
 import hashlib
@@ -23,6 +23,9 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
+
+import requests
+from bs4 import BeautifulSoup
 
 from .config import TtsConfig
 
@@ -51,6 +54,11 @@ class TTSService:
     def __init__(self, config: TtsConfig) -> None:
         self._config = config
         self._zalo_cookie: Optional[str] = None
+        # TTSFree guest session cache
+        self._ttsfree_process: Optional[str] = None
+        self._ttsfree_csrf: Optional[str] = None
+        self._ttsfree_ref: Optional[str] = None
+        self._ttsfree_session = None  # requests.Session (cookies)
 
     # ------------------------------------------------------------------
     # Cache helpers
@@ -61,7 +69,7 @@ class TTSService:
 
         Zalo includes speaker_id/speed; ResponsiveVoice includes
         gender/rate/pitch; Valtec includes voice because those
-        affect the output.  gTTS and espeak have no variable voice parameters.
+        affect the output.  gTTS has no variable voice parameters.
         """
         engine = self._config.engine
         if engine == "zalo":
@@ -73,6 +81,11 @@ class TTSService:
             )
         elif engine == "valtec":
             raw = f"{text}|valtec|{self._config.valtec_voice}|{self._config.valtec_speed}"
+        elif engine == "ttsfree":
+            raw = (
+                f"{text}|ttsfree|{self._config.ttsfree_voice}"
+                f"|{self._config.ttsfree_speed}|{self._config.ttsfree_pitch}"
+            )
         else:
             raw = f"{text}|{engine}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
@@ -95,13 +108,13 @@ class TTSService:
         engine_map: dict[str, tuple[str, Callable[[str, Path], Path]]] = {
             "gtts": ("gTTS", self._synthesize_gtts),
             "zalo": ("Zalo", self._synthesize_zalo),
-            "espeak": ("espeak", self._synthesize_espeak),
             "responsivevoice": ("ResponsiveVoice", self._synthesize_responsivevoice),
             "valtec": ("Valtec", self._synthesize_valtec),
+            "ttsfree": ("TTSFree", self._synthesize_ttsfree),
         }
         primary = self._config.engine
         order = [primary]
-        for eng in ("zalo", "valtec", "responsivevoice", "gtts", "espeak"):
+        for eng in ("zalo", "ttsfree", "responsivevoice", "gtts", "valtec"):
             if eng not in order:
                 order.append(eng)
         return [engine_map[eng] for eng in order if eng in engine_map]
@@ -275,15 +288,22 @@ class TTSService:
     def update_config(self, config: TtsConfig) -> None:
         """Update TTS configuration at runtime (engine, speaker, speed).
 
-        Clears the cached Zalo cookie when the engine or speaker changes
-        so the next call fetches a fresh one.
+        Clears the cached Zalo cookie and TTSFree session when the
+        engine or relevant params change so the next call re-initialises.
         """
         old_engine = self._config.engine
         old_speaker = self._config.zalo_speaker_id
+        old_ttsfree_voice = self._config.ttsfree_voice
         self._config = config
         if old_engine != config.engine or old_speaker != config.zalo_speaker_id:
             self._zalo_cookie = None
             logger.debug("Zalo cookie cleared due to config change")
+        if old_engine != config.engine or old_ttsfree_voice != config.ttsfree_voice:
+            self._ttsfree_session = None
+            self._ttsfree_process = None
+            self._ttsfree_csrf = None
+            self._ttsfree_ref = None
+            logger.debug("TTSFree session cleared due to config change")
 
     def get_duration(self, wav_path: Path) -> float:
         """Return the duration of a WAV file in seconds.
@@ -655,32 +675,6 @@ class TTSService:
         logger.info("gTTS WAV written to %s", output_path)
         return output_path
 
-    def _synthesize_espeak(self, text: str, output_path: Path) -> Path:
-        """Synthesize using espeak-ng (offline)."""
-        logger.info("Synthesizing with espeak-ng: '%s...'", text[:60])
-
-        # espeak-ng writes WAV directly
-        cmd = [
-            "espeak-ng",
-            "-v", "vi",  # Vietnamese voice
-            "-w", str(output_path),
-            "-s", "140",  # speed (words per minute)
-            "-p", "50",   # pitch
-            "-a", "100",  # amplitude
-            "--", text,
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-        if result.returncode != 0:
-            raise TTSException(f"espeak-ng failed: {result.stderr}")
-
-        if not output_path.exists() or output_path.stat().st_size < 100:
-            raise TTSException("espeak-ng produced empty audio")
-
-        logger.info("espeak-ng WAV written to %s", output_path)
-        return output_path
-
     def _synthesize_responsivevoice(self, text: str, output_path: Path) -> Path:
         """Synthesize using ResponsiveVoice TTS API.
 
@@ -846,6 +840,269 @@ class TTSService:
         return output_path
 
     # ------------------------------------------------------------------
+    # TTSFree guest backend (ttsfree.com — no API key required)
+    # ------------------------------------------------------------------
+
+    _TTSFREE_BASE = "https://ttsfree.com"
+    _TTSFREE_VOICEGEN = "/voice/convert/voicegen.php"
+    _TTSFREE_PROCESSING = "/voice/convert/processing.php"
+
+    def _init_ttsfree_session(self) -> None:
+        """Fetch a fresh process ID, CSRF token, and session cookie from ttsfree.com.
+
+        Parses the homepage HTML to extract hidden form inputs.
+        Caches the :class:`requests.Session` (which holds the PHPSESSID cookie)
+        so subsequent calls reuse the same session.
+        """
+        logger.info("Initializing TTSFree guest session...")
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/150.0.0.0 Safari/537.36"
+            ),
+        })
+
+        try:
+            resp = session.get(self._TTSFREE_BASE, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise TTSException(
+                f"Failed to reach ttsfree.com for session init: {exc}"
+            ) from exc
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Extract the hidden <input id="process">
+        process_el = soup.find("input", {"id": "process"})
+        if not process_el or not process_el.get("value"):
+            raise TTSException(
+                "Could not find process ID on ttsfree.com — site may have changed"
+            )
+        process_id = process_el["value"]
+
+        # Extract CSRF token
+        csrf_el = soup.find("input", {"name": "csrf_token"})
+        csrf_token = csrf_el["value"] if csrf_el else ""
+
+        # Extract ref code
+        ref_el = soup.find("input", {"name": "ref"})
+        ref_code = ref_el["value"] if ref_el else ""
+
+        self._ttsfree_session = session
+        self._ttsfree_process = process_id
+        self._ttsfree_csrf = csrf_token
+        self._ttsfree_ref = ref_code
+        logger.info(
+            "TTSFree session initialized (process=%s..., csrf=%s...)",
+            process_id[:20], csrf_token[:20] if csrf_token else "(none)",
+        )
+
+    def _synthesize_ttsfree(self, text: str, output_path: Path) -> Path:
+        """Synthesize using TTSFree.com guest API.
+
+        No API key is required — uses server-side PHP session tokens
+        parsed from the homepage.  Limited to 500 chars/request and
+        50 requests/day for guest users.
+
+        Flow:
+        1. GET homepage → parse process ID + CSRF token + cookie
+        2. POST voicegen.php (multipart form) → start synthesis
+        3. SSE polling processing.php → get progress + mp3 URL
+        4. Download MP3 → convert to WAV
+        """
+        logger.info(
+            "Synthesizing with TTSFree (voice=%s): '%s...' (%d chars)",
+            self._config.ttsfree_voice, text[:60], len(text),
+        )
+
+        # Warn if text exceeds free-tier limit
+        if len(text) > 500:
+            logger.warning(
+                "TTSFree text is %d chars — free limit is 500. "
+                "Request may be rejected or truncated.",
+                len(text),
+            )
+
+        # --- Initialize session if needed ---
+        if not self._ttsfree_session or not self._ttsfree_process:
+            self._init_ttsfree_session()
+
+        # Retry once with fresh session on auth failure
+        for _attempt in range(2):
+            try:
+                mp3_path = self._ttsfree_convert(text)
+                break
+            except TTSException as exc:
+                if _attempt == 0:
+                    logger.warning(
+                        "TTSFree attempt %d failed (%s), re-initializing session",
+                        _attempt + 1, exc,
+                    )
+                    self._init_ttsfree_session()
+                else:
+                    raise
+
+        # Convert MP3 → 8kHz 16-bit mono WAV
+        self._convert_to_wav(mp3_path, output_path)
+
+        # Clean up temp MP3
+        try:
+            mp3_path.unlink()
+        except OSError:
+            pass
+
+        if not output_path.exists() or output_path.stat().st_size < 100:
+            raise TTSException("TTSFree produced empty or invalid audio")
+
+        logger.info("TTSFree WAV written to %s", output_path)
+        return output_path
+
+    def _ttsfree_convert(self, text: str) -> Path:
+        """Submit text to TTSFree and return path to downloaded MP3."""
+        session = self._ttsfree_session
+        process_id = self._ttsfree_process
+        csrf_token = self._ttsfree_csrf
+        ref_code = self._ttsfree_ref
+
+        # Derive language code from voice ID (e.g., "vi-VN-HoaiMyNeural" → "vi-VN")
+        voice_id = self._config.ttsfree_voice
+        lang_code = "-".join(voice_id.split("-")[:2])
+
+        # Build multipart form data (matching browser behavior exactly)
+        form_data = [
+            ("input_text", (None, text)),
+            ("select_lang", (None, lang_code)),
+            ("voiceID", (None, voice_id)),
+            ("voice_service", (None, self._config.ttsfree_voice_service)),
+            ("process", (None, process_id)),
+            ("csrf_token", (None, csrf_token)),
+            ("voice", (None, voice_id)),
+            ("volume_range", (None, str(self._config.ttsfree_speed))),  # volume_range is actually speed on ttsfree.com
+            ("voice_pitch", (None, str(self._config.ttsfree_pitch))),
+            ("music", (None, "on")),
+            ("music_source", (None, "lib")),
+            ("track_id", (None, "")),
+            ("music_url", (None, "")),
+            ("bgm_url", (None, "")),
+            ("bgm_range", (None, "")),
+            ("bgm_loop", (None, "")),
+            ("bgm_volume", (None, "")),
+            ("ads-fill", (None, "1/1")),
+            ("ads-blocking", (None, "")),
+            ("action", (None, "https://ttsfree.com/")),
+            ("ref", (None, ref_code)),
+        ]
+
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "https://ttsfree.com",
+            "Referer": "https://ttsfree.com/",
+        }
+        # Ensure we send the session cookie
+        session.cookies.set("ttsconvertfirst", "true", domain="ttsfree.com")
+
+        voicegen_url = f"{self._TTSFREE_BASE}{self._TTSFREE_VOICEGEN}?id={process_id}"
+
+        try:
+            resp = session.post(
+                voicegen_url,
+                files=form_data,
+                headers=headers,
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise TTSException(
+                f"TTSFree voicegen request failed: {exc}"
+            ) from exc
+
+        if resp.status_code != 200:
+            raise TTSException(
+                f"TTSFree voicegen returned HTTP {resp.status_code}: "
+                f"{resp.text[:200]}"
+            )
+
+        # --- Poll SSE for result ---
+        processing_url = f"{self._TTSFREE_BASE}{self._TTSFREE_PROCESSING}?id={process_id}"
+        sse_headers = {
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Referer": "https://ttsfree.com/",
+        }
+
+        link_mp3: Optional[str] = None
+        try:
+            sse_resp = session.get(
+                processing_url,
+                headers=sse_headers,
+                stream=True,
+                timeout=90,
+            )
+            sse_resp.raise_for_status()
+
+            for line in sse_resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[len("data:"):].strip()
+                if not data_str:
+                    continue
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    logger.debug("TTSFree SSE: unparseable data: %s", data_str[:100])
+                    continue
+
+                status = data.get("status", "")
+                message = data.get("mess", "")
+                percel = data.get("percel", 0)
+
+                if status == "finish":
+                    link_mp3 = data.get("link_mp3")
+                    logger.info("TTSFree synthesis finished: %s", message)
+                    break
+                elif status == "error":
+                    raise TTSException(
+                        f"TTSFree synthesis error: {message}"
+                    )
+                elif status == "processing":
+                    logger.debug("TTSFree progress: %s%% — %s", percel, message)
+                else:
+                    logger.debug("TTSFree SSE: status=%s mess=%s", status, message)
+
+            sse_resp.close()
+
+        except requests.RequestException as exc:
+            raise TTSException(
+                f"TTSFree SSE processing request failed: {exc}"
+            ) from exc
+
+        if not link_mp3:
+            raise TTSException(
+                "TTSFree finished without providing an audio download URL"
+            )
+
+        # --- Download MP3 ---
+        logger.info("Downloading TTSFree MP3 from: %s", link_mp3[:80])
+        try:
+            mp3_resp = session.get(link_mp3, timeout=60)
+            mp3_resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise TTSException(
+                f"TTSFree MP3 download failed: {exc}"
+            ) from exc
+
+        # Use a temp file path for the MP3
+        mp3_path = Path(tempfile.mktemp(suffix=".ttsfree.mp3"))
+        mp3_path.write_bytes(mp3_resp.content)
+
+        if mp3_path.stat().st_size < 100:
+            raise TTSException("TTSFree returned empty MP3 audio")
+
+        logger.info("TTSFree MP3 downloaded (%d bytes)", mp3_path.stat().st_size)
+        return mp3_path
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -882,5 +1139,5 @@ class TTSService:
 
         raise TTSException(
             "ffmpeg is required to convert audio formats. "
-            "Install ffmpeg or use the espeak backend."
+            "Install ffmpeg to continue."
         )

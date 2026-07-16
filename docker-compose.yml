@@ -43,6 +43,10 @@ services:
       - VALTEC_VOICE=${VALTEC_VOICE:-NF}
       - VALTEC_HF_TOKEN=${VALTEC_HF_TOKEN:-}
       - VALTEC_SPEED=${VALTEC_SPEED:-1.0}
+      # TTSFree TTS (guest — no API key required)
+      - TTSFREE_VOICE=${TTSFREE_VOICE:-vi-VN-HoaiMyNeural}
+      - TTSFREE_SPEED=${TTSFREE_SPEED:-0}
+      - TTSFREE_PITCH=${TTSFREE_PITCH:-0}
       # TTS Cache
       - TTS_CACHE_ENABLED=${TTS_CACHE_ENABLED:-true}
       - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/audio/.tts_cache}

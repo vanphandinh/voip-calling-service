@@ -127,8 +127,8 @@ class TtsConfigUpdate(BaseModel):
 
     engine: Optional[str] = Field(
         default=None,
-        description="TTS engine: 'gtts', 'zalo', 'espeak', 'responsivevoice', or 'valtec'",
-        pattern="^(gtts|zalo|espeak|responsivevoice|valtec)$",
+        description="TTS engine: 'gtts', 'zalo', 'responsivevoice', 'valtec', or 'ttsfree'",
+        pattern="^(zalo|ttsfree|responsivevoice|gtts|valtec)$",
     )
     zalo_speaker_id: Optional[int] = Field(
         default=None,
@@ -170,7 +170,42 @@ class TtsConfigUpdate(BaseModel):
         le=2.0,
         description="Speech speed (0.5 = half speed, 1.0 = normal, 2.0 = double)",
     )
+    ttsfree_voice: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="TTSFree voice ID (e.g., 'vi-VN-HoaiMyNeural', 'vi-VN-NamMinhNeural')",
+    )
+    ttsfree_speed: Optional[int] = Field(
+        default=None,
+        ge=-100,
+        le=100,
+        description="Speech speed (-100 to 100, sent as volume_range to ttsfree.com)",
+    )
+    ttsfree_pitch: Optional[int] = Field(
+        default=None,
+        ge=-100,
+        le=100,
+        description="Pitch level (-100 to 100)",
+    )
 
+
+class TtsfreeVoiceInfo(BaseModel):
+    """Information about a TTSFree voice."""
+
+    id: str
+    gender: str
+    service: str  # "bin" (Microsoft) or "goo" (Google)
+    name: str
+
+
+TTSFREE_VOICES: list[TtsfreeVoiceInfo] = [
+    TtsfreeVoiceInfo(id="vi-VN-HoaiMyNeural", gender="Female", service="bin", name="HoaiMy"),
+    TtsfreeVoiceInfo(id="vi-VN-NamMinhNeural", gender="Male", service="bin", name="NamMinh"),
+    TtsfreeVoiceInfo(id="vi-VN-Standard-A", gender="Female", service="goo", name="Standard-A"),
+    TtsfreeVoiceInfo(id="vi-VN-Standard-B", gender="Male", service="goo", name="Standard-B"),
+    TtsfreeVoiceInfo(id="vi-VN-Standard-C", gender="Female", service="goo", name="Standard-C"),
+    TtsfreeVoiceInfo(id="vi-VN-Standard-D", gender="Male", service="goo", name="Standard-D"),
+]
 
 ZALO_VOICES: list[ZaloVoiceInfo] = [
     ZaloVoiceInfo(id=1, gender="Nu", accent="Mien Nam"),
@@ -194,11 +229,17 @@ class TtsConfigResponse(BaseModel):
     rv_configured: bool = False
     valtec_voice: str = "NF"
     valtec_speed: float = 1.0
+    ttsfree_voice: str = "vi-VN-HoaiMyNeural"
+    ttsfree_speed: int = 0
+    ttsfree_pitch: int = 0
     available_engines: list[str] = Field(
-        default_factory=lambda: ["gtts", "zalo", "espeak", "responsivevoice", "valtec"]
+        default_factory=lambda: ["zalo", "ttsfree", "responsivevoice", "gtts", "valtec"]
     )
     zalo_voices: list[ZaloVoiceInfo] = Field(
         default_factory=lambda: list(ZALO_VOICES)
+    )
+    ttsfree_voices: list[TtsfreeVoiceInfo] = Field(
+        default_factory=lambda: list(TTSFREE_VOICES)
     )
 
 

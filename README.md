@@ -15,8 +15,8 @@ External Apps (REST API)
 ┌───────────────────────┐     ┌──────────────────────────┐
 │   Calling API (8000)  │────▶│  sip.linphone.org (5061) │
 │   FastAPI + SIP socket│     │  SIP Proxy + Push        │
-│   + TTS (Valtec/Zalo/ │     └──────────┬───────────────┘
-│    RV/gTTS/espeak)     │                │
+│   + TTS (Zalo/TTSFree/ │     └──────────┬───────────────┘
+│    RV/gTTS/Valtec)      │                │
 └───────────────────────┘                │
                               Push notification + SIP call
                                          │
@@ -140,11 +140,11 @@ Dịch vụ hỗ trợ 5 engine TTS, có thể đổi runtime qua API mà không
 
 | Engine | Chất lượng | Internet | Ghi chú |
 |--------|-----------|----------|---------|
-| `valtec` | ⭐⭐⭐⭐⭐ | Cần | Valtec Vietnamese TTS, 5 giọng (NF/SF/NM1/NM2/SM), native speed |
 | `zalo` | ⭐⭐⭐⭐⭐ | Cần | 6 giọng tự nhiên (Nam/Nữ × Bắc/Nam), tốt nhất |
+| `ttsfree` | ⭐⭐⭐⭐ | Cần | TTSFree.com guest API, 48+ giọng tiếng Việt, không cần API key |
 | `responsivevoice` | ⭐⭐⭐⭐ | Cần | ResponsiveVoice API, giọng tiếng Việt, cần API key |
 | `gtts` | ⭐⭐⭐⭐ | Cần | Google TTS tiếng Việt |
-| `espeak` | ⭐⭐ | Không | Offline, giọng robot |
+| `valtec` | ⭐⭐⭐⭐⭐ | Cần | Valtec Vietnamese TTS, 5 giọng (NF/SF/NM1/NM2/SM), native speed |
 
 ### 6 giọng Zalo AI
 
@@ -241,7 +241,42 @@ curl -X PUT http://localhost:8000/api/v1/tts/config \
   -d '{"engine": "valtec", "valtec_voice": "NF"}'
 ```
 
-> **Fallback chain**: Khi engine chính lỗi, hệ thống tự động thử: engine đã config → Zalo → Valtec → ResponsiveVoice → gTTS → espeak. Điều này đảm bảo cuộc gọi luôn được thực hiện ngay cả khi mất internet.
+### TTSFree — 48+ giọng tiếng Việt (Guest API, không cần API key)
+
+Sử dụng API guest của [ttsfree.com](https://ttsfree.com) — không cần đăng ký, không cần API key.
+Giới hạn: 500 ký tự/lần, 50 lần/ngày, 500K ký tự/tháng.
+
+```bash
+TTS_ENGINE=ttsfree
+TTSFREE_VOICE=vi-VN-HoaiMyNeural    # voice ID
+TTSFREE_SPEED=0                    # -100 đến 100 (tốc độ nói)
+TTSFREE_PITCH=0                     # -100 đến 100
+```
+
+Các giọng tiếng Việt miễn phí:
+
+| Voice ID | Dịch vụ | Giới tính |
+|----------|---------|-----------|
+| `vi-VN-HoaiMyNeural` | Microsoft (bin) | Nữ — khuyên dùng |
+| `vi-VN-NamMinhNeural` | Microsoft (bin) | Nam |
+| `vi-VN-Standard-A` | Google (goo) | Nữ |
+| `vi-VN-Standard-B` | Google (goo) | Nam |
+| `vi-VN-Standard-C` | Google (goo) | Nữ |
+| `vi-VN-Standard-D` | Google (goo) | Nam |
+
+```bash
+# Đổi sang TTSFree + giọng nam
+curl -X PUT http://localhost:8000/api/v1/tts/config \
+  -H "Content-Type: application/json" \
+  -d '{"engine": "ttsfree", "ttsfree_voice": "vi-VN-NamMinhNeural"}'
+
+# Đổi tốc độ nói
+curl -X PUT http://localhost:8000/api/v1/tts/config \
+  -H "Content-Type: application/json" \
+  -d '{"engine": "ttsfree", "ttsfree_speed": 20}'
+```
+
+> **Fallback chain**: Khi engine chính lỗi, hệ thống tự động thử: engine đã config → Zalo → TTSFree → ResponsiveVoice → gTTS → Valtec. Điều này đảm bảo cuộc gọi luôn được thực hiện ngay cả khi mất internet.
 
 ## Quản lý cache TTS
 
@@ -291,12 +326,15 @@ curl -X DELETE http://localhost:8000/api/v1/tts/cache
 | `SIP_PROXY` | `sip:sip.linphone.org:5061;transport=tls` | SIP proxy |
 | `RTP_PORT_MIN` | `10000` | Port RTP bắt đầu |
 | `RTP_PORT_MAX` | `10020` | Port RTP kết thúc |
-| `TTS_ENGINE` | `gtts` | Engine TTS: `valtec`, `zalo`, `responsivevoice`, `gtts`, `espeak` |
+| `TTS_ENGINE` | `gtts` | Engine TTS: `zalo`, `ttsfree`, `responsivevoice`, `gtts`, `valtec` |
 | `ZALO_SPEAKER_ID` | `1` | Giọng Zalo (1-6), chỉ dùng khi `TTS_ENGINE=zalo` |
 | `ZALO_SPEED` | `1.0` | Tốc độ nói Zalo (0.8 - 1.2) |
 | `VALTEC_VOICE` | `NF` | Speaker Valtec (NF/SF/NM1/NM2/SM), chỉ dùng khi `TTS_ENGINE=valtec` |
 | `VALTEC_HF_TOKEN` | *(trống)* | HuggingFace token (tùy chọn), tạo tại https://huggingface.co/settings/tokens |
 | `VALTEC_SPEED` | `1.0` | Tốc độ đọc native (0.5 - 2.0) |
+| `TTSFREE_VOICE` | `vi-VN-HoaiMyNeural` | Voice ID TTSFree, chỉ dùng khi `TTS_ENGINE=ttsfree` |
+| `TTSFREE_SPEED` | `0` | Tốc độ nói TTSFree (-100 đến 100) |
+| `TTSFREE_PITCH` | `0` | Cao độ TTSFree (-100 đến 100) |
 | `RV_API_KEY` | *(bắt buộc)* | API Secret ResponsiveVoice, tạo trong dashboard |
 | `RV_SITE_ID` | *(bắt buộc)* | Site ID ResponsiveVoice, hiển thị trong dashboard |
 | `RV_GENDER` | *(trống)* | Giọng ResponsiveVoice: `male`, `female`, hoặc để trống |
@@ -382,7 +420,7 @@ voip-calling-service/
 │           ├── routes.py           # API endpoints
 │           ├── call_manager.py     # Call orchestration
 │           ├── sip_controller.py   # SIP signaling (Python socket + TLS)
-│           └── tts_service.py      # TTS (Valtec + Zalo + RV + gTTS + espeak)
+│           └── tts_service.py      # TTS (Zalo + TTSFree + RV + gTTS + Valtec)
 ```
 
 ## Xử lý lỗi thường gặp
@@ -392,10 +430,11 @@ voip-calling-service/
 | `sip_registered: false` | Sai password hoặc username | Kiểm tra `SIP_USERNAME`/`SIP_PASSWORD` trong `.env` |
 | `call failed: 404` | Target chưa đăng ký trên linphone.org | Kiểm tra target đúng username, iPhone đang Connected |
 | `call failed: 408` | Không trả lời | iPhone không online hoặc không nhận push |
-| `gTTS failed` | Không có internet | Đổi `TTS_ENGINE=zalo` hoặc `espeak` |
 | `Zalo failed` | Cookie hết hạn hoặc API quá tải | Tự động retry + fallback xuống engine tiếp theo |
+| `TTSFree failed` | Session hết hạn, quá limit (50/ngày), hoặc mất mạng | Tự động retry 1 lần với session mới + fallback |
 | `ResponsiveVoice failed` | API key sai, hết quota (429), hoặc mất mạng | Tự động retry 1 lần nếu 429 + fallback |
-| `Valtec failed` | Space quá tải hoặc mất mạng | Tự động fallback xuống Zalo → ResponsiveVoice → gTTS → espeak |
+| `gTTS failed` | Không có internet | Đổi `TTS_ENGINE=zalo` hoặc `ttsfree` |
+| `Valtec failed` | Space quá tải hoặc mất mạng | Tự động fallback xuống Zalo → TTSFree → ResponsiveVoice → gTTS |
 | **Điện thoại đổ chuông nhưng không nghe âm thanh** | RTP port bị chặn | Mở UDP ports 10000-10020 trên firewall |
 
 ## License

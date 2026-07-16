@@ -65,7 +65,7 @@ class SipConfig:
 class TtsConfig:
     """Text-to-Speech configuration."""
 
-    engine: str = "gtts"  # gtts | zalo | espeak | responsivevoice | valtec
+    engine: str = "gtts"  # zalo | ttsfree | responsivevoice | gtts | valtec
     zalo_speaker_id: int = 1  # Zalo voice ID (1-6)
     zalo_speed: float = 1.0   # Zalo speed (0.8-1.2)
     # ResponsiveVoice
@@ -78,6 +78,11 @@ class TtsConfig:
     valtec_voice: str = "NF"  # speaker: NF, SF, NM1, NM2, SM
     valtec_hf_token: str = ""  # HuggingFace token (for gated Spaces)
     valtec_speed: float = 1.0  # speech speed 0.5-2.0 (native length_scale)
+    # TTSFree (guest — no API key required)
+    ttsfree_voice: str = "vi-VN-HoaiMyNeural"  # voice ID
+    ttsfree_voice_service: str = "voice_bin"   # hardcoded, not in env (voice_bin = Microsoft Neural)
+    ttsfree_speed: int = 0                     # speech speed range -100 to 100 (sent as volume_range)
+    ttsfree_pitch: int = 0                     # pitch range -100 to 100
     # Cache
     tts_cache_enabled: bool = True
     tts_cache_dir: str = ""  # empty = use {audio_dir}/.tts_cache
@@ -92,16 +97,16 @@ class TtsConfig:
         return self.engine == "zalo"
 
     @property
-    def use_espeak(self) -> bool:
-        return self.engine == "espeak"
-
-    @property
     def use_responsivevoice(self) -> bool:
         return self.engine == "responsivevoice"
 
     @property
     def use_valtec(self) -> bool:
         return self.engine == "valtec"
+
+    @property
+    def use_ttsfree(self) -> bool:
+        return self.engine == "ttsfree"
 
 
 @dataclass
@@ -148,6 +153,9 @@ class AppConfig:
                 valtec_voice=os.getenv("VALTEC_VOICE", "NF"),
                 valtec_hf_token=os.getenv("VALTEC_HF_TOKEN", ""),
                 valtec_speed=_env_float("VALTEC_SPEED", 1.0),
+                ttsfree_voice=os.getenv("TTSFREE_VOICE", "vi-VN-HoaiMyNeural"),
+                ttsfree_speed=_env_int("TTSFREE_SPEED", 0),
+                ttsfree_pitch=_env_int("TTSFREE_PITCH", 0),
                 tts_cache_enabled=os.getenv("TTS_CACHE_ENABLED", "true").lower() != "false",
                 tts_cache_dir=os.getenv("TTS_CACHE_DIR", ""),
                 tts_cache_max_age_days=_env_int("TTS_CACHE_MAX_AGE_DAYS", 30),
@@ -185,9 +193,9 @@ class AppConfig:
                     f"'{proxy_transport}'. Set SIP_TRANSPORT to '{proxy_transport}' or "
                     f"remove ';transport=' from SIP_PROXY."
                 )
-        if self.tts.engine not in ("gtts", "zalo", "espeak", "responsivevoice", "valtec"):
+        if self.tts.engine not in ("zalo", "ttsfree", "responsivevoice", "gtts", "valtec"):
             errors.append(
-                "TTS_ENGINE must be 'gtts', 'zalo', 'espeak', 'responsivevoice', or 'valtec'"
+                "TTS_ENGINE must be 'zalo', 'ttsfree', 'responsivevoice', 'gtts', or 'valtec'"
             )
         if self.tts.engine == "zalo":
             if not (1 <= self.tts.zalo_speaker_id <= 6):
@@ -210,6 +218,13 @@ class AppConfig:
                 errors.append("VALTEC_VOICE must be a non-empty string")
             if not (0.5 <= self.tts.valtec_speed <= 2.0):
                 errors.append("VALTEC_SPEED must be between 0.5 and 2.0")
+        if self.tts.engine == "ttsfree":
+            if not self.tts.ttsfree_voice or not self.tts.ttsfree_voice.strip():
+                errors.append("TTSFREE_VOICE must be a non-empty string")
+            if not (-100 <= self.tts.ttsfree_speed <= 100):
+                errors.append("TTSFREE_SPEED must be between -100 and 100")
+            if not (-100 <= self.tts.ttsfree_pitch <= 100):
+                errors.append("TTSFREE_PITCH must be between -100 and 100")
         if not self.secret_key:
             logger.warning(
                 "SECRET_KEY is not set — API token authentication is disabled. "

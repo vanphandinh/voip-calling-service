@@ -172,6 +172,9 @@ async def get_tts_config(request: Request):
         rv_configured=bool(tts.rv_api_key and tts.rv_site_id),
         valtec_voice=tts.valtec_voice,
         valtec_speed=tts.valtec_speed,
+        ttsfree_voice=tts.ttsfree_voice,
+        ttsfree_speed=tts.ttsfree_speed,
+        ttsfree_pitch=tts.ttsfree_pitch,
     )
 
 
@@ -202,6 +205,12 @@ async def update_tts_config(request: Request, body: TtsConfigUpdate):
         tts.valtec_voice = body.valtec_voice
     if body.valtec_speed is not None:
         tts.valtec_speed = body.valtec_speed
+    if body.ttsfree_voice is not None:
+        tts.ttsfree_voice = body.ttsfree_voice
+    if body.ttsfree_speed is not None:
+        tts.ttsfree_speed = body.ttsfree_speed
+    if body.ttsfree_pitch is not None:
+        tts.ttsfree_pitch = body.ttsfree_pitch
 
     # Validate the merged config
     errors = request.app.state.config.validate()
@@ -221,6 +230,9 @@ async def update_tts_config(request: Request, body: TtsConfigUpdate):
         rv_configured=bool(tts.rv_api_key and tts.rv_site_id),
         valtec_voice=tts.valtec_voice,
         valtec_speed=tts.valtec_speed,
+        ttsfree_voice=tts.ttsfree_voice,
+        ttsfree_speed=tts.ttsfree_speed,
+        ttsfree_pitch=tts.ttsfree_pitch,
     )
 
 
