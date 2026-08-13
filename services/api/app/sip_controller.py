@@ -1,12 +1,14 @@
 """SIP controller — raw socket SIP signaling (TLS/TCP/UDP).
 
 Implements REGISTER + INVITE with MD5 digest authentication.
-RTP audio is streamed via ffmpeg using PCMU (G.711).
+RTP audio is streamed via ffmpeg using PCMU (G.711) over SDES-SRTP.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
+import os
 import re
 import socket
 import subprocess
@@ -73,6 +75,7 @@ class SipConnection:
         self._registered = False
         self._local_ip = self._detect_local_ip()
         self._transport = self._get_transport()
+        self._srtp_key: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -487,15 +490,19 @@ class SipConnection:
         if target_addr.startswith("sip:"):
             target_addr = target_addr[4:]
 
-        # Build SDP with RTP info
+        # Build SDP with RTP info. Linphone iOS (SDK 5.5) rejects unencrypted
+        # RTP/AVP with 488 when SRTP is required — offer SDES-SRTP (RTP/SAVP).
         rtp_port = self._config.rtp_port_min + 2
+        srtp_key = base64.b64encode(os.urandom(30)).decode("ascii")
+        self._srtp_key = srtp_key
         sdp = (
             f"v=0\r\n"
             f"o={username} {int(time.time())} {int(time.time())} IN IP4 {local_ip}\r\n"
             f"s=WCS Call\r\n"
             f"c=IN IP4 {self._config.nat_address or local_ip}\r\n"
             f"t=0 0\r\n"
-            f"m=audio {rtp_port} RTP/AVP 0 8 101\r\n"
+            f"m=audio {rtp_port} RTP/SAVP 0 8 101\r\n"
+            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key}\r\n"
             f"a=rtpmap:0 PCMU/8000\r\n"
             f"a=rtpmap:8 PCMA/8000\r\n"
             f"a=rtpmap:101 telephone-event/8000\r\n"
@@ -899,24 +906,36 @@ class SipConnection:
             return None
 
         rtp_port = self._config.rtp_port_min + 2
+        srtp_key = self._srtp_key
+        scheme = "srtp" if srtp_key else "rtp"
 
-        logger.info("Streaming RTP audio to %s:%d from WAV %s (local RTP port %d, timeout=%ds)",
-                   dst_addr, dst_port, wav_path, rtp_port, timeout)
+        logger.info(
+            "Streaming %s audio to %s:%d from WAV %s (local RTP port %d, timeout=%ds)",
+            scheme.upper(), dst_addr, dst_port, wav_path, rtp_port, timeout,
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-re",
+            "-i", str(wav),
+            "-af", "apad=pad_dur=5",
+            "-acodec", "pcm_mulaw",
+            "-ar", "8000",
+            "-ac", "1",
+            "-f", "rtp",
+            "-t", str(timeout),
+            "-flush_packets", "1",
+            "-loglevel", "error",
+        ]
+        if srtp_key:
+            cmd += [
+                "-srtp_out_suite", "AES_CM_128_HMAC_SHA1_80",
+                "-srtp_out_params", srtp_key,
+            ]
+        cmd.append(
+            f"{scheme}://{dst_addr}:{dst_port}?localrtpport={rtp_port}&pkt_size=160"
+        )
         proc = subprocess.Popen(
-            [
-                "ffmpeg", "-y",
-                "-re",
-                "-i", str(wav),
-                "-af", "apad=pad_dur=5",
-                "-acodec", "pcm_mulaw",
-                "-ar", "8000",
-                "-ac", "1",
-                "-f", "rtp",
-                "-t", str(timeout),
-                "-flush_packets", "1",
-                "-loglevel", "error",
-                f"rtp://{dst_addr}:{dst_port}?localrtpport={rtp_port}&pkt_size=160"
-            ],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
