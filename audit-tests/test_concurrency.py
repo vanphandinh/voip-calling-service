@@ -42,16 +42,16 @@ def proxy(port, rtp):
                 frm = re.search(r"^From:\s*(.+)$", text, re.M).group(1).rstrip("\r")
                 to = re.search(r"^To:\s*(.+)$", text, re.M).group(1).rstrip("\r")
                 if method == "REGISTER":
-                    conn.sendall(resp(via, frm, to, callid, cseq, "200 OK"))
+                    conn.sendall(resp(via, frm, to, callid, cseq + " " + method, "200 OK"))
                 elif method == "INVITE":
                     time.sleep(0.2)
                     sdp = (f"v=0\r\no=s 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
                            f"c=IN IP4 127.0.0.1\r\nm=audio {rtp} RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\n")
-                    conn.sendall(resp(via, frm, to + ";tag=s", callid, cseq, "200 OK",
+                    conn.sendall(resp(via, frm, to + ";tag=s", callid, cseq + " " + method, "200 OK",
                                       extra=f"Contact: <sip:s@127.0.0.1:{port}>\r\n",
                                       body=sdp, ctype="application/sdp"))
                 elif method == "BYE":
-                    conn.sendall(resp(via, frm, to, callid, cseq, "200 OK"))
+                    conn.sendall(resp(via, frm, to, callid, cseq + " " + method, "200 OK"))
                     return
     threading.Thread(target=handler, daemon=True).start()
 

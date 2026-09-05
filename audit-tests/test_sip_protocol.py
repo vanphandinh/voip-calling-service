@@ -88,7 +88,7 @@ class Proxy(threading.Thread):
                 print(f"    [proxy] {method} cseq={cseq}")
 
                 if method == "REGISTER":
-                    conn.sendall(resp(via, frm, to, callid, cseq, "200 OK"))
+                    conn.sendall(resp(via, frm, to, callid, cseq + " " + method, "200 OK"))
                 elif method == "INVITE":
                     if invite_cseq1 is None:
                         invite_cseq1 = cseq
@@ -102,11 +102,11 @@ class Proxy(threading.Thread):
                         invite_cseq2 = cseq
                         invite_branch2 = re.search(r"branch=([^;]+)", via).group(1)
                     # never answer
-                    conn.sendall(resp(via, frm, to, callid, cseq, "100 Trying"))
+                    conn.sendall(resp(via, frm, to, callid, cseq + " " + method, "100 Trying"))
                     if not answered:
                         answered = True
                         time.sleep(0.2)
-                        conn.sendall(resp(via, frm, to + ";tag=srv", callid, cseq, "180 Ringing"))
+                        conn.sendall(resp(via, frm, to + ";tag=srv", callid, cseq + " " + method, "180 Ringing"))
                 elif method == "CANCEL":
                     branch = re.search(r"branch=([^;]+)", via).group(1)
                     print(f"    [proxy] CANCEL branch={branch}")
@@ -114,13 +114,14 @@ class Proxy(threading.Thread):
                     self.cancel_cseq = cseq
                     self.invite2_branch = invite_branch2
                     self.invite2_cseq = invite_cseq2
-                    conn.sendall(resp(via, frm, to, callid, cseq, "200 OK"))
+                    conn.sendall(resp(via, frm, to, callid, cseq + " " + method, "200 OK"))
                     conn.sendall(resp(via, frm, to + ";tag=srv", callid,
-                                      invite_cseq2 or invite_cseq1, "487 Request Terminated"))
+                                      (invite_cseq2 or invite_cseq1) + " INVITE",
+                                      "487 Request Terminated"))
                 elif method == "ACK":
                     self.last_ack_to = to
                 elif method == "BYE":
-                    conn.sendall(resp(via, frm, to, callid, cseq, "200 OK"))
+                    conn.sendall(resp(via, frm, to, callid, cseq + " " + method, "200 OK"))
                     self.done.set(); return
         self.done.set()
 
@@ -186,10 +187,10 @@ def busy_handler():
             frm = re.search(r"^From:\s*(.+)$", text, re.M).group(1).rstrip("\r")
             to = re.search(r"^To:\s*(.+)$", text, re.M).group(1).rstrip("\r")
             if method == "REGISTER":
-                conn.sendall(resp(via, frm, to, callid, cseq, "200 OK"))
+                conn.sendall(resp(via, frm, to, callid, cseq + " " + method, "200 OK"))
             elif method == "INVITE":
                 time.sleep(0.1)
-                conn.sendall(resp(via, frm, to + ";tag=busy486tag", callid, cseq, "486 Busy Here"))
+                conn.sendall(resp(via, frm, to + ";tag=busy486tag", callid, cseq + " " + method, "486 Busy Here"))
             elif method == "ACK":
                 state["ack_to"] = to
 threading.Thread(target=busy_handler, daemon=True).start()
@@ -240,13 +241,13 @@ def avp_handler():
             frm = re.search(r"^From:\s*(.+)$", text, re.M).group(1).rstrip("\r")
             to = re.search(r"^To:\s*(.+)$", text, re.M).group(1).rstrip("\r")
             if method == "REGISTER":
-                conn.sendall(resp(via, frm, to, callid, cseq, "200 OK"))
+                conn.sendall(resp(via, frm, to, callid, cseq + " " + method, "200 OK"))
             elif method == "INVITE":
                 time.sleep(0.1)
                 sdp = ("v=0\r\no=s 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
                        "c=IN IP4 127.0.0.1\r\nm=audio 40093 RTP/AVP 8 101\r\n"
                        "a=rtpmap:8 PCMA/8000\r\n")
-                conn.sendall(resp(via, frm, to + ";tag=t9", callid, cseq, "200 OK",
+                conn.sendall(resp(via, frm, to + ";tag=t9", callid, cseq + " " + method, "200 OK",
                                   extra="Contact: <sip:s@127.0.0.1:15093>\r\n",
                                   body=sdp, ctype="application/sdp"))
 threading.Thread(target=avp_handler, daemon=True).start()

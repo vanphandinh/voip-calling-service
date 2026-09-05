@@ -52,8 +52,11 @@ _RE_QOP = re.compile(r'qop\s*=\s*"([^"]*)"', re.I)
 _RE_ALGORITHM = re.compile(r'algorithm\s*=\s*"?([^",\s]+)"?', re.I)
 # Extract status code from response
 _RE_STATUS = re.compile(r'^SIP/2\.0\s+(\d{3})', re.M)
-# Extract CSeq from any SIP message
-_RE_CSEQ = re.compile(r'^CSeq:\s*(\d+)\s+(\w+)', re.M | re.I)
+# Extract CSeq from any SIP message ("CSeq: <num> <method>").
+# NOTE: the separator must be [ \t]+ — a generic \s+ would also match a
+# line break, letting a header-less "CSeq: 3\r\nContent-Length: ..."
+# parse as method "CONTENT" (real servers always include the method).
+_RE_CSEQ = re.compile(r'^CSeq:\s*(\d+)[ \t]+([A-Za-z]+)', re.M | re.I)
 # Extract audio port from SDP (m=audio <port> ...)
 _RE_AUDIO_PORT = re.compile(r'^m=audio\s+(\d+)', re.M)
 # Extract full SDP media line: m=audio <port> <proto> <payload types...>
@@ -638,12 +641,19 @@ class SipConnection:
                 qop = _sanitize_token(qop_match.group(1) if qop_match else "")
                 algorithm = _sanitize_token(algo_match.group(1) if algo_match else "MD5", "MD5")
 
-                # ACK the 407 (To tag from the response, not a placeholder)
+                # ACK the 407 (To tag from the response, not a placeholder).
+                # RFC 3261 §17.1.1.3: the ACK completing a NON-2xx final
+                # response MUST reuse the INVITE's Via branch so the proxy
+                # can match it to the pending INVITE server transaction.
+                # A fresh branch makes the proxy treat the ACK as a stray
+                # new request and forward it — Flexisip then loop-detects
+                # its own hop and replies "482 Loop Detected", which used
+                # to abort the whole call before any audio was played.
                 cseq_match = _RE_CSEQ.search(resp)
                 if cseq_match:
                     self._send_ack(call_id, int(cseq_match.group(1)),
                                    id_clean, target_addr,
-                                   f"z9hG4bK-wcs-ack-{int(time.time()*1000)}",
+                                   invite_branch,
                                    to_tag=_to_tag(resp))
 
                 nc = "00000001"
@@ -710,6 +720,24 @@ class SipConnection:
             if not status_matches:
                 continue
             status = int(status_matches[-1].group(1))
+
+            # Only process responses belonging to the PENDING INVITE
+            # transaction (CSeq method INVITE + current CSeq number).
+            # Anything else — e.g. a "482 Loop Detected" generated because
+            # a stray ACK was forwarded, a 200 OK to a BYE, or a stale
+            # response to a superseded CSeq — must be ignored, otherwise
+            # the call gets failed for an error that is not its own.
+            cseq_iter = list(_RE_CSEQ.finditer(resp))
+            if cseq_iter:
+                resp_cseq = int(cseq_iter[-1].group(1))
+                resp_method = cseq_iter[-1].group(2).upper()
+                if resp_method != "INVITE" or resp_cseq != invite_cseq:
+                    logger.debug(
+                        "Ignoring response not matching pending INVITE "
+                        "(cseq=%s %s, pending cseq=%s INVITE): %.60s",
+                        resp_cseq, resp_method, invite_cseq, resp,
+                    )
+                    continue
 
             logger.debug("SIP response: %d", status)
 
@@ -887,11 +915,14 @@ class SipConnection:
             elif status >= 400:
                 # Final error response — ALWAYS ACK it (with the To tag from
                 # THIS response, not a placeholder) and classify correctly.
+                # RFC 3261 §17.1.1.3: ACK for a NON-2xx final response MUST
+                # complete the INVITE transaction — reuse the INVITE's Via
+                # branch (a fresh branch gets loop-detected by Flexisip,
+                # producing a bogus 482).
                 r_cseq_match = _RE_CSEQ.search(resp)
                 r_cseq = int(r_cseq_match.group(1)) if r_cseq_match else invite_cseq
-                ack_branch = f"z9hG4bK-wcs-ack-{int(time.time()*1000)}"
-                self._send_ack(call_id, r_cseq, id_clean, target_addr, ack_branch,
-                               to_tag=_to_tag(resp))
+                self._send_ack(call_id, r_cseq, id_clean, target_addr,
+                               invite_branch, to_tag=_to_tag(resp))
                 if status == 486 or status == 600:
                     logger.info("Call busy — %s (%d)", target_sip, status)
                     return CallResult.BUSY
