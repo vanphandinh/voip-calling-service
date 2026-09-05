@@ -6,6 +6,88 @@
 > **Kết quả vòng 1:** 3 Critical, 5 High, 10 Medium + các Low — toàn bộ có bằng chứng tái hiện.
 > **Kết quả sau sửa (vòng 2 & 3):** ✅ **66/66 checks PASS — không còn lỗi Critical/High.**
 > **Vòng 4 (dọn dead code):** ✅ xóa 5 mục dead code, ruff F401/F841/F811 sạch, full suite vẫn **66/66 PASS**.
+> **Vòng 5 (lỗi production 482 Loop Detected):** ✅ ACK cho 407/final-error dùng lại branch của INVITE (RFC 3261 §17.1.1.3), main loop lọc response theo transaction, `_RE_CSEQ` không khớp xuyên dòng — test hồi quy mới 4/4, full suite **70/70 PASS**.
+
+## Vòng 5 — Lỗi production "482 Loop Detected" trên sip.linphone.org (2026-09-05)
+
+### Triệu chứng
+
+Cuộc gọi test đầu tiên trên hệ thống sau merge PR #1: **không nghe thấy âm thanh, người nhận
+không đổ chuông**. Log container:
+
+```
+[WARNING] wcs.sip: Call failed with 482 — sip:vanphandinh@sip.linphone.org
+SIP/2.0 482 Loop Detected
+Via: SIP/2.0/TLS 172.20.0.2:46176;branch=z9hG4bK-wcs-ack-1788600876917;rport=46176;...
+CSeq: 3 ACK
+Server: Flexisip/2.6.0-1-g32c1968f (sofia-sip-nta/2.0)
+[INFO] wcs.manager: Call a077b60a5cb3 finished: failed (1.9s)
+```
+
+Manh mối then chốt: `CSeq: 3 ACK` — 482 này là **phản hồi cho gói ACK của chính client**
+(ACK vốn không có response; Flexisip chỉ trả 482 khi ACK bị xử lý như một request độc lập).
+Cuộc gọi FAILED ở 1.9s — trước khi 180/200 kịp về → chưa bao giờ connect → không có audio.
+
+### Gốc rễ — 3 lỗi xếp lớp
+
+| # | Lỗi | Vị trí (trước fix) | Hậu quả |
+|---|-----|--------------------|---------|
+| 1 | **ACK cho 407 dùng branch MỚI** (`z9hG4bK-wcs-ack-…`) thay vì dùng lại branch của INVITE. RFC 3261 §17.1.1.3: ACK hoàn tất final response **non-2xx** thuộc cùng transaction với INVITE → phải cùng Via branch. Chỉ ACK cho **2xx** mới là transaction mới. | `_invite()` khối 407 | Flexisip không khớp ACK với INVITE server transaction đang treo → coi là request lạ → forward → gặp lại chính nó → trả **482 Loop Detected** cho ACK |
+| 2 | **Main loop nhận 482 (thuộc ACK) làm final response của INVITE** — không kiểm tra CSeq method/số của response có khớp INVITE đang chờ hay không. | `_invite()` main loop | `Call failed with 482` → `CallResult.FAILED` ở 1.9s, cuộc gọi bị hủy trước khi 180/200 về |
+| 3 | `_RE_CSEQ = r'^CSeq:\s*(\d+)\s+(\w+)'` — `\s+` khớp cả xuống dòng: `CSeq: 3\r\nContent-Length: 0` parse thành method `CONTENT`. | hằng regex | Tiềm ẩn xử lý sai message dị dạng (số đúng nhưng method sai) |
+
+Ngoài ra, ACK cho **mọi final error** trong main loop (486/487/408/603…) cũng dùng branch mới —
+cùng lớp lỗi với #1, chưa bộc lộ chỉ vì Flexisip trả lỗi đó *sau* khi đã có 407 → auth.
+
+### Các fix (chỉ chạm `services/api/app/sip_controller.py`)
+
+1. `_RE_CSEQ` → `r'^CSeq:\s*(\d+)[ \t]+([A-Za-z]+)'` (separator chỉ là khoảng trắng ngang).
+2. ACK cho 407 → `via_branch=invite_branch` (branch của INVITE vừa bị challenge).
+3. Main loop: sau khi parse status, **bỏ qua** mọi response có CSeq method ≠ `INVITE` hoặc số
+   CSeq ≠ `invite_cseq` (log ở mức debug) — 482-của-ACK, 200-của-BYE, response stale của CSeq cũ
+   không còn làm hỏng cuộc gọi.
+4. ACK cho final error (`status >= 400`) → `via_branch=invite_branch`.
+
+**Giữ nguyên (đúng RFC):** ACK cho 200 OK vẫn dùng branch mới (ACK-2xx là transaction riêng);
+BYE, CANCEL (đã dùng `_pending_invite_branch` từ vòng 2), `_send_ok_to_bye` không đổi.
+
+### Test proxy trong `audit-tests/` — vá đi kèm
+
+Các fake proxy cũ emit `CSeq: 3` (thiếu method) — không hợp lệ theo RFC nhưng regex cũ vẫn "nuốt"
+được nhờ khớp xuyên dòng. Sau fix #1 header như vậy không còn được nhận diện →
+`_recv_final("REGISTER")` treo hết timeout. Đã vá 17 call sites (`test_sip_protocol.py` 10,
+`test_concurrency.py` 3, `test_e2e_call.py` 4) để emit `CSeq: <num> <METHOD>` hợp lệ.
+
+### Test hồi quy mới — `audit-tests/test_482_regression.py`
+
+Mô phỏng đúng luồng Flexisip: REGISTER 200 → INVITE(2) → **407** → ACK(2) → INVITE(3) +
+Proxy-Authorization → 100/180/200 OK (`RTP/AVP 0`, tag `6Nmj2N2ymF2SS` y như log thật) → BYE.
+Proxy giả kiểm tra branch của ACK-407: nếu ≠ branch INVITE → trả 482 giống Flexisip.
+
+Proxy giả chèn 0.3s trước `100 Trying` của INVITE retry để tái hiện đúng timing Flexisip
+(482-của-ACK là message **đầu tiên** main loop nhìn thấy — nếu không, 482 bị chôn cùng buffer
+TCP với 100 Trying và code cũ pass "ăn may").
+
+| Check | Code cũ (main) | Sau fix |
+|---|---|---|
+| 407-ACK dùng lại Via branch của INVITE | ❌ `wcs-ack-…` ≠ `wcs-inv-…-2` | ✅ |
+| Proxy không loop-detect ACK | ❌ đã gửi 482 | ✅ |
+| Cuộc gọi CONNECTED (200 OK xử lý, media start) | ❌ | ✅ |
+| Kết quả COMPLETED | ❌ `Call failed with 482` → FAILED | ✅ 2.7s |
+
+Kiểm chứng thêm bằng biến thể "proxy luôn trả 482 cho mọi ACK" (proxy thù địch): nhờ fix #3
+cuộc gọi vẫn COMPLETED — bộ lọc transaction tự bảo vệ kể cả khi proxy hành xử sai.
+
+### Kết quả nghiệm thu
+
+- `python3 -m py_compile services/api/app/*.py` sạch.
+- `test_482_regression.py`: **4/4 PASS** (COMPLETED 2.4s).
+- Full suite: 25/25 · 19/19 · 4/4 · 10/10 · 8/8 · 4/4 · concurrency PASS → **70/70**.
+- Smoke boot uvicorn → `GET /api/v1/health` 200.
+- **Xác nhận sau deploy:** gọi thật tới sip.linphone.org — log phải có `Call ringing` →
+  `Call connected` → `Negotiated media` → `Playback starting`, KHÔNG còn `Call failed with 482`.
+
+---
 
 ## Vòng 4 — Dọn dead code & audit lại (2026-09-05)
 

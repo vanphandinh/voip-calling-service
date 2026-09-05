@@ -79,11 +79,11 @@ def run_scenario(port, mode, rtp_port):
                 method = h["cseq"][1]
 
                 if method == "REGISTER":
-                    conn.sendall(resp(h["via"], h["frm"], h["to"], h["callid"], h["cseq"][0], "200 OK"))
+                    conn.sendall(resp(h["via"], h["frm"], h["to"], h["callid"], h["cseq"][0] + " " + h["cseq"][1], "200 OK"))
                 elif method == "INVITE":
-                    conn.sendall(resp(h["via"], h["frm"], h["to"], h["callid"], h["cseq"][0], "100 Trying"))
+                    conn.sendall(resp(h["via"], h["frm"], h["to"], h["callid"], h["cseq"][0] + " " + h["cseq"][1], "100 Trying"))
                     time.sleep(0.2)
-                    conn.sendall(resp(h["via"], h["frm"], h["to"] + ";tag=srv", h["callid"], h["cseq"][0], "180 Ringing"))
+                    conn.sendall(resp(h["via"], h["frm"], h["to"] + ";tag=srv", h["callid"], h["cseq"][0] + " " + h["cseq"][1], "180 Ringing"))
                     time.sleep(0.3)
                     sdp = (f"v=0\r\no=s 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
                            f"c=IN IP4 127.0.0.1\r\nm=audio {rtp_port} RTP/AVP 0 101\r\n"
@@ -105,7 +105,7 @@ def run_scenario(port, mode, rtp_port):
                 elif method == "ACK":
                     state["ack_to"] = h["to"]
                 elif method == "BYE":
-                    conn.sendall(resp(h["via"], h["frm"], h["to"], h["callid"], h["cseq"][0], "200 OK"))
+                    conn.sendall(resp(h["via"], h["frm"], h["to"], h["callid"], h["cseq"][0] + " " + h["cseq"][1], "200 OK"))
                     state["got_local_bye"].set()
                     return
         return
