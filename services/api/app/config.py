@@ -88,26 +88,6 @@ class TtsConfig:
     tts_cache_dir: str = ""  # empty = use {audio_dir}/.tts_cache
     tts_cache_max_age_days: int = 30  # files older than this are cleaned up
 
-    @property
-    def use_gtts(self) -> bool:
-        return self.engine == "gtts"
-
-    @property
-    def use_zalo(self) -> bool:
-        return self.engine == "zalo"
-
-    @property
-    def use_responsivevoice(self) -> bool:
-        return self.engine == "responsivevoice"
-
-    @property
-    def use_valtec(self) -> bool:
-        return self.engine == "valtec"
-
-    @property
-    def use_ttsfree(self) -> bool:
-        return self.engine == "ttsfree"
-
 
 @dataclass
 class CallConfig:
@@ -126,6 +106,8 @@ class AppConfig:
     call: CallConfig = field(default_factory=CallConfig)
     log_level: str = "INFO"
     secret_key: str = ""  # master key for signing API tokens — set via SECRET_KEY env var
+    # CORS allow-list: comma-separated origins from CORS_ORIGINS env (default "*")
+    cors_origins: list[str] = field(default_factory=lambda: ["*"])
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -166,6 +148,11 @@ class AppConfig:
             ),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             secret_key=os.getenv("SECRET_KEY", ""),
+            cors_origins=[
+                o.strip()
+                for o in os.getenv("CORS_ORIGINS", "*").split(",")
+                if o.strip()
+            ] or ["*"],
         )
 
     def validate(self) -> list[str]:
@@ -183,6 +170,13 @@ class AppConfig:
             )
         if self.sip.proxy and not self.sip.proxy.startswith("sip:"):
             errors.append("SIP_PROXY must start with 'sip:'")
+        if self.sip.rtp_port_max < self.sip.rtp_port_min:
+            errors.append("RTP_PORT_MAX must be >= RTP_PORT_MIN")
+        elif (self.sip.rtp_port_max - self.sip.rtp_port_min) // 2 < 1:
+            errors.append(
+                "RTP port range must contain at least 2 ports "
+                "(RTP uses even ports: RTP_PORT_MIN to RTP_PORT_MAX)"
+            )
         if self.sip.proxy and "transport=" in self.sip.proxy:
             proxy_transport = (
                 self.sip.proxy.split("transport=")[1].split(";")[0].strip().lower()

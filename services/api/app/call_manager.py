@@ -13,22 +13,21 @@ import logging
 import math
 import socket
 import threading
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from .config import AppConfig, TtsConfig
 from .models import CallRequest, CallResponse, CallStatus, CallStatusResponse
 from .sip_controller import CallResult, SipController
-from .tts_service import TTSException, TTSService
+# APAD_SECS: silence padding baked into every synthesized WAV by TTSService.
+# Imported (not redefined) so the timeout math here always matches the audio.
+from .tts_service import APAD_SECS, TTSException, TTSService
 
 logger = logging.getLogger("wcs.manager")
-
-# Seconds of silence appended by ffmpeg's apad filter to ensure
-# clean end-of-stream and prevent the last audio packets from being
-# dropped during ffmpeg shutdown (AVIO buffer flush race).
-APAD_SECS = 5
 
 # Maximum number of call records kept in memory. Oldest terminal
 # records (completed/failed) are evicted when this limit is exceeded.
@@ -82,6 +81,10 @@ class CallManager:
         self._tts = TTSService(config.tts)
         self._calls: dict[str, CallRecord] = {}
         self._lock = threading.Lock()
+        # Strong references to background tasks — asyncio only keeps weak
+        # refs, so tasks without a reference can be garbage-collected
+        # mid-flight (see CPython docs on asyncio.create_task).
+        self._tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -92,8 +95,14 @@ class CallManager:
 
         Returns immediately with call_id and 'queued' status.
         """
-        response = CallResponse()
-        record = CallRecord(response.call_id, request)
+        # Build the record first, then the response FROM the record so the
+        # timestamps returned to the caller match the stored ones exactly.
+        record = CallRecord(uuid4().hex[:12], request)
+        response = CallResponse(
+            call_id=record.call_id,
+            status=record.status,
+            created_at=record.created_at,
+        )
 
         with self._lock:
             self._calls[record.call_id] = record
@@ -106,7 +115,9 @@ class CallManager:
 
         # Launch background execution
         try:
-            asyncio.create_task(self._execute(record))
+            task = asyncio.create_task(self._execute(record))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
         except RuntimeError:
             # No running event loop — spawn a background thread
             threading.Thread(
@@ -187,14 +198,19 @@ class CallManager:
     # ------------------------------------------------------------------
 
     def _evict_old_records(self) -> None:
-        """Evict oldest terminal records when over the max limit."""
-        if len(self._calls) <= MAX_CALL_RECORDS:
-            return
+        """Evict oldest terminal records when over the max limit.
 
+        Never evicts records with in-flight calls (queued/synthesizing/
+        calling) — a 404 on an active call would be worse than slightly
+        exceeding the in-memory cap.
+        """
         terminal = {
             CallStatus.COMPLETED, CallStatus.FAILED,
             CallStatus.NO_ANSWER, CallStatus.BUSY,
         }
+        if len(self._calls) <= MAX_CALL_RECORDS:
+            return
+
         terminal_records = sorted(
             [r for r in self._calls.values() if r.status in terminal],
             key=lambda r: r.updated_at,
@@ -209,19 +225,22 @@ class CallManager:
                 excess, len(self._calls), MAX_CALL_RECORDS,
             )
 
-        # Hard cap: if still over 120% limit, evict oldest regardless of status
+        # Soft cap: if still over 120% limit, evict oldest records — but
+        # STILL only terminal ones. Active calls are never evicted.
         hard_limit = int(MAX_CALL_RECORDS * 1.2)
         if len(self._calls) > hard_limit:
-            all_sorted = sorted(
-                self._calls.values(), key=lambda r: r.updated_at
+            evictable = sorted(
+                [r for r in self._calls.values() if r.status in terminal],
+                key=lambda r: r.updated_at,
             )
-            overflow = len(self._calls) - target
-            for r in all_sorted[:overflow]:
+            overflow = min(len(evictable), len(self._calls) - target)
+            for r in evictable[:overflow]:
                 del self._calls[r.call_id]
-            logger.warning(
-                "Hard eviction: removed %d records (over 120%% limit, total=%d)",
-                overflow, len(self._calls),
-            )
+            if overflow:
+                logger.warning(
+                    "Hard eviction: removed %d records (over 120%% limit, total=%d)",
+                    overflow, len(self._calls),
+                )
 
     # ------------------------------------------------------------------
     # Background execution
@@ -314,59 +333,116 @@ class CallManager:
         logger.debug("Call %s → %s", record.call_id, status.value)
 
     async def _fire_webhook(self, record: CallRecord) -> None:
-        """POST call status to the callback URL."""
-        try:
-            # SSRF protection: reject private/internal IP targets
-            # DNS lookup runs in thread pool to avoid blocking the event loop
-            loop = asyncio.get_running_loop()
-            is_private = await loop.run_in_executor(
-                None, self._is_private_target, record.callback_url
-            )
-            if is_private:
-                logger.warning(
-                    "Blocked callback to private/internal IP: %s", record.callback_url
-                )
-                return
+        """POST call status to the callback URL (SSRF-hardened).
 
-            async with aiohttp.ClientSession() as session:
-                payload = record.to_response().model_dump(mode="json")
-                async with session.post(
-                    record.callback_url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    logger.debug("Webhook to %s → HTTP %d", record.callback_url, resp.status)
+        Every hop is resolved and validated BEFORE connecting, and the
+        connection is PINNED to the validated IP via a custom aiohttp
+        resolver — so a DNS rebinding between validation and connection
+        is ineffective. Redirects are NOT followed automatically; we
+        follow them ourselves (max 4) and re-validate every hop.
+        """
+        url = record.callback_url
+        payload = record.to_response().model_dump(mode="json")
+        loop = asyncio.get_running_loop()
+        try:
+            current = url
+            for _hop in range(4):
+                ip = await loop.run_in_executor(None, self._resolve_public_ip, current)
+                if ip is None:
+                    logger.warning(
+                        "Blocked callback to private/internal/unresolvable target: %s",
+                        current,
+                    )
+                    return
+                connector = aiohttp.TCPConnector(resolver=_PinnedResolver(ip))
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    async with session.post(
+                        current,
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                        allow_redirects=False,
+                    ) as resp:
+                        if resp.status in (301, 302, 303, 307, 308):
+                            location = resp.headers.get("Location")
+                            if not location:
+                                logger.debug("Webhook redirect without Location: %s", current)
+                                return
+                            current = urllib.parse.urljoin(current, location)
+                            continue
+                        logger.debug(
+                            "Webhook to %s → HTTP %d", current, resp.status
+                        )
+                        return
+            logger.warning("Webhook redirect limit exceeded: %s", url)
         except Exception:
-            logger.warning("Webhook to %s failed", record.callback_url, exc_info=True)
+            logger.warning("Webhook to %s failed", url, exc_info=True)
 
     @staticmethod
-    def _is_private_target(url: str) -> bool:
-        """Check whether *url* resolves to a private/internal IP address.
+    def _resolve_public_ip(url: str) -> Optional[str]:
+        """Resolve *url*'s host and return an IP only if it is safe to dial.
 
-        Returns ``True`` (block) if:
-        - The hostname cannot be extracted
-        - Any resolved IP is in a private, loopback, link-local, or
-          unspecified range
+        Returns ``None`` (block) when:
+        - the hostname cannot be extracted or resolved
+        - ANY resolved address is private / loopback / link-local /
+          unspecified / multicast / reserved / CGNAT (100.64.0.0/10) /
+          an IPv4-mapped IPv6 address
         """
         try:
             parsed = urlparse(url)
             hostname = parsed.hostname
             if not hostname:
-                return True
+                return None
             addrs = socket.getaddrinfo(hostname, None)
-            for family, _, _, _, sockaddr in addrs:
-                ip_str = sockaddr[0]
-                try:
-                    ip = ipaddress.ip_address(ip_str)
-                    if (
-                        ip.is_private
-                        or ip.is_loopback
-                        or ip.is_link_local
-                        or ip.is_unspecified
-                    ):
-                        return True
-                except ValueError:
-                    continue
-            return False
         except (socket.gaierror, ValueError, OSError):
-            return True  # cannot resolve — block to be safe
+            return None
+
+        cgnat = ipaddress.ip_network("100.64.0.0/10")
+        safe: list[str] = []
+        for _family, _, _, _, sockaddr in addrs:
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+            except ValueError:
+                continue
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_unspecified
+                or ip.is_multicast
+                or ip.is_reserved
+            ):
+                return None
+            if ip.version == 6 and ip.ipv4_mapped is not None:
+                return None
+            if ip.version == 4 and ip in cgnat:
+                return None
+            safe.append(ip_str)
+        return safe[0] if safe else None
+
+
+class _PinnedResolver(aiohttp.resolver.AbstractResolver):
+    """DNS resolver that always returns ONE pre-validated IP address.
+
+    Used by the webhook client so the connection is guaranteed to go to
+    the IP that passed the SSRF check (no re-resolution = no rebinding).
+    The Host header / TLS SNI still use the URL's original hostname.
+    """
+
+    def __init__(self, ip: str) -> None:
+        self._ip = ip
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET):
+        return [
+            {
+                "hostname": host,
+                "host": self._ip,
+                "port": port,
+                "family": family,
+                "proto": 0,
+                "flags": socket.AI_NUMERICHOST,
+            }
+        ]
+
+    async def close(self) -> None:  # pragma: no cover — nothing to release
+        pass

@@ -108,11 +108,32 @@ curl -X POST http://localhost:8000/api/v1/call \
 | `GET` | `/api/v1/call/{id}` | Xem trạng thái cuộc gọi |
 | `GET` | `/api/v1/calls` | Danh sách cuộc gọi gần đây |
 | `GET` | `/api/v1/health` | Health check |
+| `POST` | `/api/v1/auth/token` | Đổi `SECRET_KEY` lấy access token (HMAC, hạn 24h) |
 | `GET` | `/api/v1/tts/config` | Xem cấu hình TTS hiện tại |
 | `PUT` | `/api/v1/tts/config` | Đổi engine/giọng nói/tốc độ runtime |
 | `GET` | `/api/v1/tts/cache` | Xem thống kê cache TTS |
 | `DELETE` | `/api/v1/tts/cache` | Xóa file cache TTS cũ hơn N ngày |
 | `GET` | `/docs` | Swagger UI |
+
+### Xác thực API (tùy chọn nhưng khuyến nghị)
+
+Đặt `SECRET_KEY` trong `.env` để bật xác thực. Khi đó mọi endpoint (trừ
+`/health`, `/auth/token`, `/docs`) yêu cầu `Authorization: Bearer <token>`:
+
+```bash
+# 1. Đổi SECRET_KEY lấy token (rate limit: 5 lần/phút/IP)
+curl -X POST http://localhost:8000/api/v1/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"secret_key": "<SECRET_KEY-cua-ban>"}'
+# → {"access_token":"<payload>.<signature>","token_type":"bearer","expires_in":86400}
+
+# 2. Dùng token cho các request
+curl http://localhost:8000/api/v1/calls -H "Authorization: Bearer <token>"
+```
+
+> **Cảnh báo**: Nếu `SECRET_KEY` bỏ trống (mặc định), xác thực bị TẮT — bất kỳ
+> ai truy cập được port API đều có thể gọi điện. Luôn đặt `SECRET_KEY` khi
+> triển khai ngoài localhost. Rate limit mặc định: 10 cuộc gọi/giây/IP.
 
 ### POST /api/v1/call
 
@@ -347,6 +368,7 @@ curl -X DELETE http://localhost:8000/api/v1/tts/cache
 | `API_PORT` | `8000` | Cổng API HTTP |
 | `LOG_LEVEL` | `INFO` | Log level |
 | `SECRET_KEY` | *(trống)* | Khóa chính để ký access token. Nếu trống, auth bị vô hiệu |
+| `CORS_ORIGINS` | `*` | Danh sách origin cho phép CORS (phân cách bằng dấu phẩy) |
 | `SSL_ENABLED` | *(trống)* | Bật HTTPS (`true`/`false`). Nếu trống, tự động phát hiện cert |
 | `SSL_DOMAIN` | *(trống)* | Tên miền cho Let's Encrypt SSL |
 

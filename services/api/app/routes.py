@@ -6,8 +6,9 @@ import hashlib
 import hmac
 import json
 import logging
+import threading
 import time
-from collections import defaultdict
+from dataclasses import replace as dataclass_replace
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -34,33 +35,62 @@ router = APIRouter(prefix="/api/v1", tags=["calls"])
 # Rate limiting — sliding window per source IP
 # ---------------------------------------------------------------------------
 
-_rate_limit_buckets: dict[str, list[float]] = defaultdict(list)
-RATE_LIMIT_MAX = 10       # max calls per window
-RATE_LIMIT_WINDOW = 1.0   # window in seconds
+
+class RateLimiter:
+    """Thread-safe sliding-window rate limiter.
+
+    Records the timestamp of every request BEFORE deciding, so the very
+    first request is counted (the old implementation lost the first
+    timestamp and therefore never blocked anything).
+
+    The key store is bounded: when it grows beyond ``max_keys``, stale
+    entries (no events within the window) are purged.
+    """
+
+    def __init__(self, max_events: int, window_seconds: float, max_keys: int = 10_000):
+        self.max_events = max_events
+        self.window = window_seconds
+        self.max_keys = max_keys
+        self._buckets: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        """Record an event for *key* and return True if it is within quota."""
+        now = time.monotonic()
+        window_start = now - self.window
+        with self._lock:
+            if len(self._buckets) > self.max_keys:
+                stale = [
+                    k for k, ts in self._buckets.items()
+                    if not ts or ts[-1] < window_start
+                ]
+                for k in stale:
+                    del self._buckets[k]
+            bucket = [t for t in self._buckets.get(key, ()) if t >= window_start]
+            bucket.append(now)
+            self._buckets[key] = bucket
+            return len(bucket) <= self.max_events
+
+
+# Max calls per IP per window
+CALL_RATE_LIMITER = RateLimiter(max_events=10, window_seconds=1.0)
+# Stricter limit for the token endpoint to slow down online brute-force
+TOKEN_RATE_LIMITER = RateLimiter(max_events=5, window_seconds=60.0)
 
 # Token expiry (seconds)
 TOKEN_EXPIRY_SECONDS = 86400  # 24 hours
 
 
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
 def _check_rate_limit(request: Request) -> bool:
-    """Enforce per-IP rate limit. Returns ``True`` if the request is allowed."""
-    client_ip = request.client.host if request.client else "unknown"
-    now = time.monotonic()
-    window_start = now - RATE_LIMIT_WINDOW
-
-    bucket = _rate_limit_buckets[client_ip]
-    _rate_limit_buckets[client_ip] = [t for t in bucket if t >= window_start]
-
-    if not _rate_limit_buckets[client_ip]:
-        del _rate_limit_buckets[client_ip]
-        return True
-
-    if len(_rate_limit_buckets[client_ip]) >= RATE_LIMIT_MAX:
-        logger.warning("Rate limit exceeded for IP %s", client_ip)
-        return False
-
-    _rate_limit_buckets[client_ip].append(now)
-    return True
+    """Enforce per-IP rate limit for call submissions."""
+    allowed = CALL_RATE_LIMITER.allow(_client_ip(request))
+    if not allowed:
+        logger.warning("Rate limit exceeded for IP %s", _client_ip(request))
+    return allowed
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +192,11 @@ async def list_calls(
 async def get_tts_config(request: Request):
     """Get the current TTS configuration and available voices."""
     tts = request.app.state.config.tts
+    return _tts_config_response(tts)
+
+
+def _tts_config_response(tts) -> TtsConfigResponse:
+    """Build the TTS config response from a :class:`TtsConfig`."""
     return TtsConfigResponse(
         engine=tts.engine,
         zalo_speaker_id=tts.zalo_speaker_id,
@@ -188,52 +223,24 @@ async def update_tts_config(request: Request, body: TtsConfigUpdate):
     tts = request.app.state.config.tts
     mgr = _get_manager(request)
 
-    # Merge: keep existing values for fields not provided
-    if body.engine is not None:
-        tts.engine = body.engine
-    if body.zalo_speaker_id is not None:
-        tts.zalo_speaker_id = body.zalo_speaker_id
-    if body.zalo_speed is not None:
-        tts.zalo_speed = body.zalo_speed
-    if body.rv_gender is not None:
-        tts.rv_gender = body.rv_gender
-    if body.rv_rate is not None:
-        tts.rv_rate = body.rv_rate
-    if body.rv_pitch is not None:
-        tts.rv_pitch = body.rv_pitch
-    if body.valtec_voice is not None:
-        tts.valtec_voice = body.valtec_voice
-    if body.valtec_speed is not None:
-        tts.valtec_speed = body.valtec_speed
-    if body.ttsfree_voice is not None:
-        tts.ttsfree_voice = body.ttsfree_voice
-    if body.ttsfree_speed is not None:
-        tts.ttsfree_speed = body.ttsfree_speed
-    if body.ttsfree_pitch is not None:
-        tts.ttsfree_pitch = body.ttsfree_pitch
+    # Build a NEW TtsConfig instead of mutating the shared one in place.
+    # (Mutating first and comparing later made TTSService.update_config's
+    # change-detection dead code — old values always equalled new values.)
+    changes = {k: v for k, v in body.model_dump().items() if v is not None}
+    new_tts = dataclass_replace(tts, **changes) if changes else tts
 
     # Validate the merged config
+    old_tts = request.app.state.config.tts
+    request.app.state.config.tts = new_tts
     errors = request.app.state.config.validate()
     if errors:
+        request.app.state.config.tts = old_tts  # revert on failure
         raise HTTPException(status_code=422, detail="; ".join(errors))
 
-    # Push to CallManager → TTSService
-    mgr.update_tts_config(tts)
+    # Push the (distinct) new config object to CallManager → TTSService
+    mgr.update_tts_config(new_tts)
 
-    return TtsConfigResponse(
-        engine=tts.engine,
-        zalo_speaker_id=tts.zalo_speaker_id,
-        zalo_speed=tts.zalo_speed,
-        rv_gender=tts.rv_gender,
-        rv_rate=tts.rv_rate,
-        rv_pitch=tts.rv_pitch,
-        rv_configured=bool(tts.rv_api_key and tts.rv_site_id),
-        valtec_voice=tts.valtec_voice,
-        valtec_speed=tts.valtec_speed,
-        ttsfree_voice=tts.ttsfree_voice,
-        ttsfree_speed=tts.ttsfree_speed,
-        ttsfree_pitch=tts.ttsfree_pitch,
-    )
+    return _tts_config_response(new_tts)
 
 
 # ---------------------------------------------------------------------------
@@ -294,8 +301,21 @@ async def create_token(request: Request, body: TokenRequest):
 
     The token is valid for 24 hours and is verified on all other
     endpoints via the ``Authorization: Bearer <token>`` header.
+    Rate limited per source IP to slow down online brute-force attempts.
     """
+    if not TOKEN_RATE_LIMITER.allow(_client_ip(request)):
+        logger.warning("Token rate limit exceeded for IP %s", _client_ip(request))
+        raise HTTPException(
+            status_code=429,
+            detail="Too many token requests — retry later",
+        )
+
     config = request.app.state.config
+    if not config.secret_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Token endpoint disabled — SECRET_KEY is not configured",
+        )
     if not hmac.compare_digest(body.secret_key.encode(), config.secret_key.encode()):
         raise HTTPException(status_code=401, detail="Invalid secret key")
 

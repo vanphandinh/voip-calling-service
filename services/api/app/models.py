@@ -1,11 +1,12 @@
 """Pydantic models for API request/response validation."""
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +28,11 @@ class CallStatus(str, Enum):
 # Request models
 # ---------------------------------------------------------------------------
 
+# Strict SIP-URI whitelist: blocks CR/LF injection (SIP header injection),
+# whitespace, quotes and angle brackets while still allowing user@host:port;params.
+_SIP_URI_RE = re.compile(r"^sip:[A-Za-z0-9\-._!~*'()&=+$,;:?@\[\]%]+$")
+
+
 class CallRequest(BaseModel):
     """Request to trigger an announcement call."""
 
@@ -43,6 +49,20 @@ class CallRequest(BaseModel):
         min_length=1,
         max_length=2000,
     )
+
+    @field_validator("target")
+    @classmethod
+    def _validate_target(cls, v: str) -> str:
+        v = v.strip()
+        if not v.startswith("sip:"):
+            raise ValueError("target must start with 'sip:' (e.g. 'sip:user@domain')")
+        if not _SIP_URI_RE.match(v):
+            raise ValueError(
+                "target contains characters not allowed in a SIP URI "
+                "(CR/LF, spaces, quotes, angle brackets are forbidden)"
+            )
+        return v
+
     repeat: int = Field(
         default=2,
         ge=1,

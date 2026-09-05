@@ -32,6 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ------------------------------------------------------------------
 WORKDIR /app
 
+# Upgrade pip + setuptools first (base image ships vulnerable versions)
+RUN pip install --no-cache-dir --upgrade "pip>=25" "setuptools>=83"
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -65,7 +68,8 @@ EXPOSE 8000
 
 # ENTRYPOINT needs root to copy Let's Encrypt certs (privkey.pem is 0600 root:root).
 # It drops privileges to 'wcs' via gosu before launching the CMD.
-# HEALTHCHECK above was defined under USER wcs so it still runs as wcs.
+# NOTE: HEALTHCHECK above runs as root too (the last USER directive wins).
+# That is intentional: /app/healthcheck.sh only needs curl.
 USER root
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
