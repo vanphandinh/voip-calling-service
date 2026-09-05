@@ -5,6 +5,39 @@
 > **Phương pháp:** đọc tĩnh toàn bộ code + kiểm chứng động (unit probe, fake SIP proxy TCP, capture RTP bằng UDP listener, TestClient FastAPI, pip-audit)
 > **Kết quả vòng 1:** 3 Critical, 5 High, 10 Medium + các Low — toàn bộ có bằng chứng tái hiện.
 > **Kết quả sau sửa (vòng 2 & 3):** ✅ **66/66 checks PASS — không còn lỗi Critical/High.**
+> **Vòng 4 (dọn dead code):** ✅ xóa 5 mục dead code, ruff F401/F841/F811 sạch, full suite vẫn **66/66 PASS**.
+
+## Vòng 4 — Dọn dead code & audit lại (2026-09-05)
+
+Quét bằng `ruff --select F401,F841,F811,F403` + `vulture --min-confidence 60/90` + grep thủ công
+từng candidate để phân biệt dead-code thật với false-positive (FastAPI route handlers, pydantic
+fields và `_PinnedResolver.resolve` là interface bắt buộc — đều **giữ lại**).
+
+### Đã xóa (5 mục)
+
+| # | Dead code | Lý do chết | File |
+|---|---|---|---|
+| 1 | `TtsConfig.use_gtts/use_zalo/use_responsivevoice/use_valtec/use_ttsfree` (5 properties) | Không có bất kỳ tham chiếu nào — TTSService so sánh `engine` trực tiếp | `config.py` |
+| 2 | `RateLimiter.current_usage()` | Helper thêm ở vòng 2 nhưng không endpoint nào gọi | `routes.py` |
+| 3 | `SipConnection._md5()` | Mồ côi sau khi `_compute_digest` chuyển sang `_hash_hex()` (MD5/SHA-256/SHA-512) | `sip_controller.py` |
+| 4 | `SipConnection.rtp_port` property | Không ai đọc — chỉ dùng attribute nội bộ `_rtp_port` | `sip_controller.py` |
+| 5 | `import shutil` cục bộ trong `_convert_to_wav` | Trùng với module-level import | `tts_service.py` |
+
+### Đã xem xét và GIỮ (không phải dead code)
+
+- `CallResult.DECLINED` — vòng 1 là dead, nhưng sau fix M1 nó được sinh bởi **603 Decline** (đường dẫn thật).
+- Tất cả route handlers (`health_check`, `trigger_call`, `create_token`…) — đăng ký qua decorator `@router`.
+- `auth_middleware` — đăng ký qua `@app.middleware`.
+- `_PinnedResolver.resolve` — triển khai `aiohttp.resolver.AbstractResolver` (gọi bởi aiohttp).
+- Pydantic model fields — dùng cho serialization/OpenAPI.
+
+### Kết quả audit lại sau khi xóa
+
+- `ruff --select F401,F841,F811,F403`: **All checks passed** (67 cảnh báo E501 line-too-long là phong cách có sẵn từ code gốc, không phải dead code).
+- `vulture --min-confidence 90`: **0 kết quả**.
+- Compile + import OK; full test suite **66/66 PASS** (25+19+4+10+8 + concurrency PASS); smoke boot uvicorn: `/health` OK, `PUT /tts/config` hoạt động.
+
+---
 
 ## Nhật ký sửa lỗi & xác minh (vòng 2 + 3)
 

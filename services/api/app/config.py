@@ -88,26 +88,6 @@ class TtsConfig:
     tts_cache_dir: str = ""  # empty = use {audio_dir}/.tts_cache
     tts_cache_max_age_days: int = 30  # files older than this are cleaned up
 
-    @property
-    def use_gtts(self) -> bool:
-        return self.engine == "gtts"
-
-    @property
-    def use_zalo(self) -> bool:
-        return self.engine == "zalo"
-
-    @property
-    def use_responsivevoice(self) -> bool:
-        return self.engine == "responsivevoice"
-
-    @property
-    def use_valtec(self) -> bool:
-        return self.engine == "valtec"
-
-    @property
-    def use_ttsfree(self) -> bool:
-        return self.engine == "ttsfree"
-
 
 @dataclass
 class CallConfig:

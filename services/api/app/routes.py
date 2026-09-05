@@ -71,11 +71,6 @@ class RateLimiter:
             self._buckets[key] = bucket
             return len(bucket) <= self.max_events
 
-    def current_usage(self, key: str) -> int:
-        now = time.monotonic()
-        with self._lock:
-            return sum(1 for t in self._buckets.get(key, ()) if t >= now - self.window)
-
 
 # Max calls per IP per window
 CALL_RATE_LIMITER = RateLimiter(max_events=10, window_seconds=1.0)

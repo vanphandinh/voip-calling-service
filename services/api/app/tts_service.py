@@ -1170,7 +1170,6 @@ class TTSService:
 
         # If input is already WAV and ffmpeg unavailable, copy as-is
         if input_path.suffix.lower() == ".wav":
-            import shutil
             shutil.copy2(input_path, output_path)
             return
 

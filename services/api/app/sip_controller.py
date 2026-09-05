@@ -145,10 +145,6 @@ class SipConnection:
     def expires(self) -> int:
         return self._expires
 
-    @property
-    def rtp_port(self) -> int:
-        return self._rtp_port
-
     def connect(self) -> None:
         with self._lock:
             if self._sock is not None:
@@ -363,9 +359,6 @@ class SipConnection:
                 if status >= 200 and cseq_method == method.upper():
                     return resp
         return last
-
-    def _md5(self, data: str) -> str:
-        return hashlib.md5(data.encode()).hexdigest()
 
     def _hash_hex(self, data: str, algorithm: str) -> str:
         """Hash per the digest algorithm (MD5 / SHA-256 / SHA-512)."""
