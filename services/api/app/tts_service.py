@@ -12,6 +12,7 @@ import hashlib
 import http.cookiejar
 import json
 import logging
+import os
 import re
 import shutil
 import struct
@@ -20,6 +21,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
@@ -30,6 +32,14 @@ from bs4 import BeautifulSoup
 from .config import TtsConfig
 
 logger = logging.getLogger("wcs.tts")
+
+# Seconds of silence padded to the END of every synthesized WAV file.
+# The padding is baked into the FILE (not added while streaming) so that
+# ffmpeg's `-re` flag paces it in real time — a filter-side `apad` during
+# RTP streaming is NOT paced and would flush minutes of RTP in milliseconds.
+# Single source of truth: call_manager imports this for timeout math.
+APAD_SECS = 5
+_PAD_FILTER = f"apad=pad_dur={APAD_SECS}"
 
 # Suppress noisy httpx / gradio_client heartbeat logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -139,7 +149,8 @@ class TTSService:
         if output_path:
             wav_path = Path(output_path)
         else:
-            wav_path = Path(tempfile.mktemp(suffix=".wav"))
+            # NOTE: tempfile.mktemp() is deprecated/racy — use a UUID name instead.
+            wav_path = Path(tempfile.gettempdir()) / f"wcs_{uuid.uuid4().hex}.wav"
 
         wav_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -156,13 +167,16 @@ class TTSService:
 
         # Build ordered list of backends: configured primary first, then fallbacks
         backends = self._build_backend_order()
+        primary_name = backends[0][0]
 
         # Try backends in order until one succeeds
         last_exception: Optional[Exception] = None
+        used_backend: Optional[str] = None
         for name, method in backends:
             try:
                 method(text, wav_path)
                 logger.info("TTS succeeded with %s", name)
+                used_backend = name
                 break
             except Exception as exc:
                 logger.warning(
@@ -176,14 +190,25 @@ class TTSService:
                 f"All TTS backends failed for text: '{text[:50]}...'"
             ) from last_exception
 
-        # --- Cache: save successful result (regardless of which backend produced it) ---
-        if self._config.tts_cache_enabled:
+        # --- Cache: save successful result ---
+        # Only cache when the PRIMARY engine produced the audio. A fallback
+        # engine's output has a different voice and must not be stored under
+        # the primary engine's cache key (it would poison later cache hits).
+        if self._config.tts_cache_enabled and used_backend == primary_name:
             cached = self._cache_path(cache_key)
+            # Atomic write: copy to a temp sibling, then os.replace() so a
+            # concurrent reader never sees a half-written cache file.
+            tmp = cached.with_name(f"{cached.name}.tmp{os.getpid()}.{uuid.uuid4().hex[:8]}")
             try:
-                shutil.copy2(wav_path, cached)
+                shutil.copy2(wav_path, tmp)
+                os.replace(tmp, cached)
                 logger.debug("TTS cached to %s (key=%s)", cached, cache_key)
             except OSError as exc:
                 logger.warning("Failed to write TTS cache: %s", exc)
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
         return wav_path
 
@@ -456,8 +481,15 @@ class TTSService:
                 with urllib.request.urlopen(api_req, timeout=30) as resp:
                     body = resp.read().decode()
             except urllib.request.HTTPError as exc:
-                if exc.code in (401, 403):
+                if exc.code in (401, 403) and _attempt == 0:
+                    # Cookie expired — refresh and retry once before giving up
+                    logger.debug("Zalo HTTP %d, refreshing cookie and retrying", exc.code)
                     self._zalo_cookie = None
+                    try:
+                        self._zalo_cookie = self._fetch_zalo_cookie()
+                        continue
+                    except TTSException:
+                        pass  # fall through to raise below
                 raise TTSException(
                     f"Zalo API request failed (HTTP {exc.code}): {exc}"
                 ) from exc
@@ -561,10 +593,12 @@ class TTSService:
                     out_fh.write(seg_data)
 
             # 6. Convert concatenated AAC → WAV (8 kHz, 16-bit PCM, mono)
+            #    with trailing silence baked into the file (see APAD_SECS).
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-v", "error",
                     "-i", str(tmp_aac),
+                    "-af", _PAD_FILTER,
                     "-ar", "8000",
                     "-ac", "1",
                     "-sample_fmt", "s16",
@@ -1092,8 +1126,8 @@ class TTSService:
                 f"TTSFree MP3 download failed: {exc}"
             ) from exc
 
-        # Use a temp file path for the MP3
-        mp3_path = Path(tempfile.mktemp(suffix=".ttsfree.mp3"))
+        # Use a temp file path for the MP3 (UUID name — mktemp is racy)
+        mp3_path = Path(tempfile.gettempdir()) / f"wcs_{uuid.uuid4().hex}.ttsfree.mp3"
         mp3_path.write_bytes(mp3_resp.content)
 
         if mp3_path.stat().st_size < 100:
@@ -1111,6 +1145,8 @@ class TTSService:
         """Convert audio file to RTP-compatible WAV format (8kHz mono PCM).
 
         8000 Hz, 16-bit PCM, 1 channel (mono).
+        Appends APAD_SECS of silence INSIDE the file so ffmpeg's `-re`
+        paces it in real time during RTP streaming (see APAD_SECS docs).
         Tries ffmpeg first, falls back to a basic copy if audio is already WAV.
         """
         # Try ffmpeg
@@ -1119,6 +1155,7 @@ class TTSService:
                 [
                     "ffmpeg", "-y", "-v", "error",
                     "-i", str(input_path),
+                    "-af", _PAD_FILTER,  # trailing silence baked into the file
                     "-ar", "8000",       # sample rate
                     "-ac", "1",           # mono
                     "-sample_fmt", "s16", # 16-bit PCM

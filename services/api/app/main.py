@@ -101,18 +101,17 @@ def create_app() -> FastAPI:
         swagger_ui_parameters={"persistAuthorization": True},
     )
 
-    # CORS — allow external apps to call this service
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # Auth middleware — verifies HMAC-signed Bearer tokens
+    # Auth middleware — verifies HMAC-signed Bearer tokens.
+    # NOTE: registered BEFORE CORSMiddleware (below) so CORS ends up
+    # OUTERMOST: preflight OPTIONS requests are answered by the CORS
+    # middleware and error responses (401) still get CORS headers.
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
+        # OPTIONS (CORS preflight) never carries Authorization headers —
+        # let it through as defense-in-depth (CORS middleware handles it first).
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         # Public paths — no token required
         public_paths = {
             "/docs",
@@ -179,6 +178,19 @@ def create_app() -> FastAPI:
             )
 
         return await call_next(request)
+
+    # CORS — added AFTER the auth middleware so it wraps it (outermost):
+    # preflight OPTIONS is answered before auth runs, and 401 responses
+    # still receive CORS headers. Bearer-token auth doesn't need cookies,
+    # so allow_credentials stays False (per spec, "*" is incompatible
+    # with credentialed requests anyway).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.cors_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.include_router(router)
 
